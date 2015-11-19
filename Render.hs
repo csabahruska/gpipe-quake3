@@ -53,12 +53,10 @@ renderQuake startPos bsp@BSPLevel{..} =
   runContextT GLFW.newContext (ContextFormatColorDepth RGB32F Depth32F) $ do
     -- pre tesselate patches and append to static draw verices and indices
     let patches     = map (tessellatePatch blDrawVertices 5) $ V.toList blSurfaces
+        (verticesQ3,indicesQ3) = mconcat $ (blDrawVertices,blDrawIndices):patches
         patchSize   = [(V.length v, V.length i) | (v,i) <- patches]
         patchOffset = scanl' (\(offsetV,offsetI) (v,i) -> (offsetV + v, offsetI + i)) (V.length blDrawVertices, V.length blDrawIndices) patchSize
         patchInfo   = zip patchOffset patchSize
-        (patchVertices,patchIndices) = mconcat patches
-        verticesQ3  = blDrawVertices `mappend` patchVertices
-        indicesQ3   = blDrawIndices `mappend` patchIndices
 
     vertexBufferQ3 :: Buffer os (B3 Float, B4 Float) <- newBuffer (V.length verticesQ3)
     writeBuffer vertexBufferQ3 0 [ (V3 x y z, V4 r g b a)
@@ -69,7 +67,6 @@ renderQuake startPos bsp@BSPLevel{..} =
 
     indexBufferQ3 :: Buffer os (B Word32) <- newBuffer $ V.length indicesQ3
     writeBuffer indexBufferQ3 0 $ map fromIntegral $ V.toList indicesQ3 
-
 
     uniformBuffer :: Buffer os (Uniform (B3 Float, B3 Float, B3 Float)) <- newBuffer 1
 
