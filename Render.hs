@@ -1,6 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables, PackageImports, TypeFamilies, FlexibleContexts, RecordWildCards #-}
 module Render where
 
+import Control.Monad.Exception (MonadException)
 import Control.Monad.IO.Class
 import Graphics.GPipe
 import qualified "GPipe-GLFW" Graphics.GPipe.Context.GLFW as GLFW
@@ -11,12 +12,15 @@ import Data.Word (Word32)
 import Control.Applicative (pure)
 import Data.Monoid (mappend)
 
+import qualified Data.Map as Map
+import qualified Data.Trie as T
 import qualified Data.Vector as V
 import Data.Vect hiding (Vector)
 import Data.Bits
 import BSP
 import Camera
 import Q3Patch
+import Material
 
 import Data.List (foldl',scanl')
 
@@ -38,18 +42,45 @@ tessellatePatch drawV level sf@Surface{..} = case srSurfaceType of
 convertSurface BSPLevel{..} indexBufferQ3 vertexBufferQ3 patchInfo sf@Surface{..} = do
   let Shader name sfFlags _ = blShaders V.! srShaderNum
       noDraw = sfFlags .&. 0x80 /= 0
-      emitStream prim firstVertex numVertices firstIndex numIndices = if noDraw then return mempty else do
+      emitStream prim firstVertex numVertices firstIndex numIndices = if noDraw then return (0,mempty) else do
         vertexArrayQ3 <- (takeVertices numVertices . dropVertices firstVertex) <$> newVertexArray vertexBufferQ3
         indexArrayQ3 <- (takeIndices numIndices . dropIndices firstIndex) <$> newIndexArray indexBufferQ3 Nothing
-        return $ toPrimitiveArrayIndexed prim indexArrayQ3 vertexArrayQ3
+        return (srShaderNum,toPrimitiveArrayIndexed prim indexArrayQ3 vertexArrayQ3)
   case srSurfaceType of
-    Flare -> return mempty
+    Flare -> return (srShaderNum,mempty)
     Patch -> let ((firstVertex,firstIndex),(numVertices,numIndices)) = patchInfo
              in emitStream TriangleStrip firstVertex numVertices firstIndex numIndices
     _ -> emitStream TriangleList srFirstVertex srNumVertices srFirstIndex srNumIndices
 
-renderQuake :: Vec3 -> BSPLevel -> IO ()
-renderQuake startPos bsp@BSPLevel{..} =
+type CF = ContextFormat RGBFloat Depth
+type A = PrimitiveArray Triangles (B3 Float, B4 Float)
+
+missingMaterial :: (MonadIO m, MonadException m) => Buffer os (Uniform (B3 Float, B3 Float, B3 Float)) -> ContextT w os CF m (CompiledShader os CF A)
+missingMaterial uniformBuffer = do 
+ liftIO (putStr "-")
+ compileShader $ do
+  (eye,center,up) <- getUniform (const (uniformBuffer,0))
+  fragmentStream <- getProjectedFragments 600 eye center up id
+  let fragmentStream2 = fmap ((\(_,V4 r g b a) -> V3 r g b)) fragmentStream
+      fragmentStream3 = withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) fragmentStream2
+  --drawContextColor (const (ContextColorOption NoBlending (pure True))) fragmentStream2
+  drawContextColorDepth (const (ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream3
+
+compileMaterial :: (MonadIO m, MonadException m) => Buffer os (Uniform (B3 Float, B3 Float, B3 Float)) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF A)
+compileMaterial uniformBuffer shaderInfo = do 
+ liftIO (putStr ".")
+ shader <- compileShader $ do
+  (eye,center,up) <- getUniform (const (uniformBuffer,0))
+  fragmentStream <- getProjectedFragments 600 eye center up id
+  let fragmentStream2 = fmap ((\(_,V4 r g b a) -> V3 r g b)) fragmentStream
+      fragmentStream3 = withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) fragmentStream2
+  --drawContextColor (const (ContextColorOption NoBlending (pure True))) fragmentStream2
+  drawContextColorDepth (const (ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream3
+ return $ \s -> do
+    shader s -- TODO
+
+renderQuake :: Vec3 -> BSPLevel -> T.Trie CommonAttrs -> IO ()
+renderQuake startPos bsp@BSPLevel{..} shaderInfo =
   runContextT GLFW.newContext (ContextFormatColorDepth RGB32F Depth32F) $ do
     -- pre tesselate patches and append to static draw verices and indices
     let patches     = map (tessellatePatch blDrawVertices 5) $ V.toList blSurfaces
@@ -70,21 +101,22 @@ renderQuake startPos bsp@BSPLevel{..} =
 
     uniformBuffer :: Buffer os (Uniform (B3 Float, B3 Float, B3 Float)) <- newBuffer 1
 
+    -- shader for unknown materials
+    missingMaterialShader <- missingMaterial uniformBuffer
+
+    --  create shader for each material
+    usedShaders <- mapM (\Shader{..} -> maybe (return missingMaterialShader) (compileMaterial uniformBuffer) $ T.lookup shName shaderInfo) blShaders
+    let surfaces = do
+          surface0 <- zipWithM (convertSurface bsp indexBufferQ3 vertexBufferQ3) patchInfo $ V.toList blSurfaces
+          -- group surfaces by material
+          let surface1 = Map.unionsWith mappend . map (uncurry Map.singleton) $ surface0
+              surface2 = Map.mapWithKey (\shader surface -> (caSort <$> T.lookup (shName $ blShaders V.! shader) shaderInfo, (usedShaders V.! shader) surface)) surface1
+              -- sort surfaces by render queue
+              sorted = concat $ Map.elems $ Map.unionsWith mappend [Map.singleton k [v] | (k,v) <- Map.elems surface2]
+              allSurf = sequence_ sorted
+          allSurf
+
     liftIO $ putStrLn "Hello 1"
-
-    shaderQ3 <- compileShader $ do
-      (eye,center,up) <- getUniform (const (uniformBuffer,0))
-
-      fragmentStream <- getProjectedFragments 600 eye center up id
-
-      let fragmentStream2 = fmap ((\(_,V4 r g b a) -> V3 r g b)) fragmentStream
-          fragmentStream3 = withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) fragmentStream2
-
-      --drawContextColor (const (ContextColorOption NoBlending (pure True))) fragmentStream2
-      drawContextColorDepth (const (ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream3
-
-    let surfaces = shaderQ3 =<< mconcat <$> (zipWithM (convertSurface bsp indexBufferQ3 vertexBufferQ3) patchInfo $ V.toList blSurfaces)
-
     renderLoop uniformBuffer (s0 startPos) [
       do
         --liftIO $ putStrLn "Hello 2"

@@ -74,7 +74,7 @@ main = do
     --putStrLn $ unlines ["  " ++ l | l <- lines $ ppShow $ T.toList shMap]
 
     putStrLn $ "loading: " ++ show bspName
-    renderQuake p0 bsp
+    renderQuake p0 bsp shMap
 
 -- pk3 handling
 

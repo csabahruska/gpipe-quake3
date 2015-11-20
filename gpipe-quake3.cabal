@@ -37,7 +37,8 @@ executable gpipe-quake3
                        zlib >=0.6 && <0.7,
                        GLFW-b >= 1.4 && <1.5,
                        lens >= 4.12 && <4.13,
-                       GPipe-GLFW >= 1.1 && <1.2
+                       GPipe-GLFW >= 1.1 && <1.2,
+                       exception-transformers >= 0.4 && <0.5
   -- hs-source-dirs:      
   default-language:    Haskell2010
   ghc-options: -O2 -threaded
