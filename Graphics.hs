@@ -55,7 +55,7 @@ mkWave' uni off (Wave wFunc base amplitude phase freq) = realToFrac base + a * r
   where
     u           = off + realToFrac phase + realToFrac freq * time uni
     uv          = V2 u 0
-    V4 v _ _ _  = V4 0 0 0 0 --TODO unpack' $ texture' sampler uv
+    V4 v _ _ _  = V4 1 1 1 1 --TODO unpack' $ texture' sampler uv
     a           = v * 2 - 1
     --sampler     = Sampler LinearFilter Repeat $ TextureSlot name (Texture2D (Float RGBA) n1)
     name        = case wFunc of
