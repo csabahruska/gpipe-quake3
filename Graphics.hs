@@ -1,57 +1,215 @@
-{-# LANGUAGE TypeOperators, OverloadedStrings, DataKinds #-}
+{-# LANGUAGE ScopedTypeVariables, PackageImports, TypeFamilies, FlexibleContexts, RecordWildCards #-}
 module Graphics where
 
 import Data.ByteString.Char8 (ByteString)
 import qualified Data.ByteString.Char8 as SB
 import Data.List
-import Data.Digest.CRC32
+--import Data.Digest.CRC32
 import Data.Maybe
 import Data.Vect
-import LambdaCube.GL
+import "lens" Control.Lens
 
 import Material hiding (Blending)
 
-import Debug.Trace
+import Graphics.GPipe as GPipe
 
--- specialized snoc
-v3v4 :: Exp s V3F -> Exp s V4F
-v3v4 v = let V3 x y z = unpack' v in pack' $ V4 x y z (Const 1)
-
-v4v3 :: Exp s V4F -> Exp s V3F
-v4v3 v = let V4 x y z _ = unpack' v in pack' $ V3 x y z
-
--- specialized snoc
-snoc :: Exp s V3F -> Float -> Exp s V4F
-snoc v s = let V3 x y z = unpack' v in pack' $ V4 x y z (Const s)
-
-snoc' :: Exp s V3F -> Exp s Float -> Exp s V4F
-snoc' v s = let V3 x y z = unpack' v in pack' $ V4 x y z s
-
-drop4 :: Exp s V4F -> Exp s V3F
-drop4 v = let V4 x y z _ = unpack' v in pack' $ V3 x y z
-
-drop3 :: Exp s V3F -> Exp s V2F
-drop3 v = let V3 x y _ = unpack' v in pack' $ V2 x y
-
-mkRasterContext :: CommonAttrs -> RasterContext Triangle
-mkRasterContext ca = TriangleCtx cull PolygonFill offset LastVertex
+mkColor uni ca sa (V4 rV gV bV aV) = V4 cr cg cb alpha
   where
-    offset  = if caPolygonOffset ca then Offset (-1) (-2) else NoOffset
+    green = V3 0 1 0
+    V3 cr cg cb = case saRGBGen sa of
+        RGB_Wave w              -> let c = mkWave uni w in V3 c c c
+        RGB_Const r g b         -> V3 (realToFrac r) (realToFrac g) (realToFrac b)
+        RGB_Identity            -> V3 1 1 1
+        RGB_IdentityLighting    -> V3 (identityLight_ uni) (identityLight_ uni) (identityLight_ uni)
+        RGB_Entity              -> entityRGB uni
+        RGB_OneMinusEntity      -> V3 1 1 1 - entityRGB uni
+        RGB_ExactVertex         -> V3 rV gV bV
+        RGB_Vertex              -> V3 rV gV bV ^* identityLight_ uni
+        RGB_LightingDiffuse     -> green -- TODO
+        {-  input:
+                entity: ambientLight
+                        directedLight
+                        lightDir
+                model:  position
+                        normal
+        -}
+        RGB_OneMinusVertex      -> V3 1 1 1 - V3 rV gV bV ^* identityLight_ uni
+
+    alpha = case saAlphaGen sa of
+        A_Wave w            -> let a = mkWave uni w in clamp a 0 1
+        A_Const a           -> realToFrac a
+        A_Portal            -> 1 -- TODO
+        A_Identity          -> 1
+        A_Entity            -> entityAlpha uni
+        A_OneMinusEntity    -> 1 - entityAlpha uni
+        A_Vertex            -> aV
+        A_LightingSpecular  -> 1 -- TODO
+        {-  input:
+                model:  position
+                        normal
+                user:   viewOrigin
+        -}
+        A_OneMinusVertex    -> 1 - aV
+
+mkWave' uni off (Wave wFunc base amplitude phase freq) = realToFrac base + a * realToFrac amplitude :: VFloat
+  where
+    u           = off + realToFrac phase + realToFrac freq * time uni
+    uv          = V2 u 0
+    V4 v _ _ _  = V4 0 0 0 0 --TODO unpack' $ texture' sampler uv
+    a           = v * 2 - 1
+    --sampler     = Sampler LinearFilter Repeat $ TextureSlot name (Texture2D (Float RGBA) n1)
+    name        = case wFunc of
+        WT_Sin              -> "SinTable"
+        WT_Triangle         -> "TriangleTable"
+        WT_Square           -> "SquareTable"
+        WT_Sawtooth         -> "SawToothTable"
+        WT_InverseSawtooth  -> "InverseSawToothTable"
+        WT_Noise            -> "Noise"
+
+mkWave uni w = mkWave' uni 0 w :: VFloat
+
+mkDeform uni uv normal pos d = case d of
+    D_Move (Vec3 x y z) w   -> pos + V3 (realToFrac x) (realToFrac y) (realToFrac z) ^* mkWave uni w
+    D_Wave spread w@(Wave _ _ _ _ f)
+        | f < 0.000001  -> pos + normal ^* mkWave uni w
+        | otherwise     ->
+            let V3 x y z    = pos
+                off         = (x + y + z) * realToFrac spread
+            in pos + normal ^* mkWave' uni off w
+    D_Bulge w h s   -> let V2 u _   = uv
+                           now      = time uni * realToFrac s
+                           off      = u * realToFrac w + now
+                       in pos + normal ^* (sin off * realToFrac h)
+    _ -> pos
+
+mkTCMod uni pos uv m = case m of
+    TM_Scroll su sv -> uv + V2 (realToFrac su) (realToFrac sv) ^* time uni
+    TM_Scale su sv  -> uv * V2 (realToFrac su) (realToFrac sv)
+    TM_Stretch w    -> let p    = 1 / mkWave uni w
+                           off  = 0.5 - 0.5 * p
+                       in uv ^* p + V2 off off
+    TM_Rotate speed -> let fi   = (-realToFrac speed * pi / 180) * time uni
+                           s    = sin fi
+                           ms   = s * (-1)
+                           c    = cos fi
+                           mA   = V2 c s
+                           mB   = V2 ms c
+                           m    = V2 mA mB
+                           off  = V2 (0.5 - 0.5 * c + 0.5 * s) (0.5 - 0.5 * s - 0.5 * c)
+                       in m !* uv + off
+    TM_Transform m00 m01 m10 m11 t0 t1  -> let V2 u v   = uv
+                                               u'       = u * realToFrac m00 + v * realToFrac m10 + realToFrac t0
+                                               v'       = u * realToFrac m01 + v * realToFrac m11 + realToFrac t1
+                                           in V2 u' v'
+    TM_Turb base amp phase freq ->  let V2 u v      = uv
+                                        V3 x y z    = pos
+                                        now         = realToFrac phase + time uni * realToFrac freq
+                                        offU        = (2 * pi) * ((x + z) * (0.125 / 128) + now)
+                                        offV        = (2 * pi) * (y * (0.125 / 128) + now)
+                                    in uv + sin (V2 offU offV) ^* realToFrac amp
+    _ -> uv
+
+mkTexCoord uni pos normal sa uvD uvL = foldl' (mkTCMod uni pos) uv $ saTCMod sa
+  where
+    uv = case saTCGen sa of
+        TG_Base         -> uvD
+        TG_Lightmap     -> uvL
+        TG_Environment  ->  let viewer      = signorm $ viewOrigin uni - pos
+                                d           = normal `dot` viewer
+                                V3 _ y z    = normal ^* (2 * d) - viewer
+                            in V2 (0.5 + y * 0.5) (0.5 - z * 0.5)
+        TG_Vector (Vec3 sx sy sz) (Vec3 tx ty tz)   -> let s    = V3 (realToFrac sx) (realToFrac sy) (realToFrac sz)
+                                                           t    = V3 (realToFrac tx) (realToFrac ty) (realToFrac tz)
+                                                       in V2 (pos `dot` s) (pos `dot` t)
+
+lookAt' eye center up =
+  V4 (V4 (xa^._x)  (xa^._y)  (xa^._z)  xd)
+     (V4 (ya^._x)  (ya^._y)  (ya^._z)  yd)
+     (V4 (-za^._x) (-za^._y) (-za^._z) zd)
+     (V4 0         0         0          1)
+  where za = signorm $ center - eye
+        xa = signorm $ cross za up
+        ya = cross xa za
+        xd = -dot xa eye
+        yd = -dot ya eye
+        zd = dot za eye
+
+entityRGB       (a,_,_,_,_,_,_) = a
+entityAlpha     (_,a,_,_,_,_,_) = a
+identityLight_  (_,_,a,_,_,_,_) = a
+time            (_,_,_,a,_,_,_) = a
+viewOrigin      (_,_,_,_,a,_,_) = a
+viewTarget      (_,_,_,_,_,a,_) = a
+viewUp          (_,_,_,_,_,_,a) = a
+{-
+uniform tuple:
+      entityRGB, entityAlpha, identityLight, time,  viewOrigin, viewTarget, viewUp
+      (V3 Float, Float,       Float,         Float, V3 Float,   V3 Float,   V3 Float)
+-}
+
+mkVertexShader uni ca sa (p@(V3 x y z),n,d,l,c) = (screenPos, (uv, color))
+  where
+    viewMat     = lookAt' (viewOrigin uni) (viewTarget uni) (viewUp uni)
+    projMat     = perspective (pi/3) 1 1 10000
+    screenPos   = projMat !*! viewMat !* V4 x y z 1
+    pos         = foldl' (mkDeform uni d n) p $ caDeformVertexes ca
+    uv          = mkTexCoord uni pos n sa d l
+    color       = mkColor uni ca sa c
+
+mkFragmentShader sa (uv,rgba) = color
+  where
+    stageTex    = saTexture sa
+    stageTexN   = ""--TODO SB.pack $ "Tex_" ++ show (crc32 $ SB.pack $ show stageTex)
+    color       = case stageTex of
+        ST_WhiteImage   -> rgba
+        ST_Lightmap     -> rgba * texColor ClampToEdge "LightMap"
+        ST_Map {}       -> rgba * texColor Repeat  stageTexN
+        ST_ClampMap {}  -> rgba * texColor ClampToEdge stageTexN
+        ST_AnimMap {}   -> rgba * texColor Repeat  stageTexN
+    texColor em name = V4 1 1 1 1 --TODO: texture' sampler uv
+      where
+        --sampler     = Sampler LinearFilter em $ TextureSlot name (Texture2D (Float RGBA) n1)
+
+mkFilterFunction sa (uv,rgba) = case saAlphaFunc sa of
+    Nothing -> true
+    Just f  ->
+        let
+            V4 _ _ _ a  = color
+            stageTex    = saTexture sa
+            stageTexN   = ""--SB.pack $ "Tex_" ++ show (crc32 $ SB.pack $ show stageTex)
+            color       = case stageTex of
+                ST_WhiteImage   -> rgba
+                ST_Lightmap     -> rgba * texColor ClampToEdge "LightMap"
+                ST_Map {}       -> rgba * texColor Repeat  stageTexN
+                ST_ClampMap {}  -> rgba * texColor ClampToEdge stageTexN
+                ST_AnimMap {}   -> rgba * texColor Repeat  stageTexN
+            texColor em name = V4 1 1 1 1-- TODO: texture' sampler uv
+              where
+                --sampler     = Sampler LinearFilter em $ TextureSlot name (Texture2D (Float RGBA) n1)
+        in case f of
+            A_Gt0   -> a >* 0
+            A_Lt128 -> a GPipe.<* 0.5
+            A_Ge128 -> a >=* 0.5
+
+mkRasterContext :: CommonAttrs -> (Side, ViewPort, DepthRange)
+mkRasterContext ca = (cull, ViewPort (V2 0 0) (V2 size size), DepthRange 0 1)
+  where
+    size = 600
+    -- TODO: offset  = if caPolygonOffset ca then Offset (-1) (-2) else NoOffset
     cull    = case caCull ca of
-        CT_FrontSided   -> CullFront CCW
-        CT_BackSided    -> CullBack CCW
-        CT_TwoSided     -> CullNone
+        CT_FrontSided   -> Front
+        CT_BackSided    -> Back
+        CT_TwoSided     -> FrontAndBack
 
---mkAccumulationContext :: StageAttrs -> (FragmentOperation (Depth Float)):+:(FragmentOperation (Color V4F)):+:ZZ
-mkAccumulationContext sa = AccumulationContext Nothing $ DepthOp depthFunc depthWrite:.ColorOp blend (one' :: V4B):.ZT
+mkAccumulationContext :: StageAttrs -> (ContextColorOption RGBAFloat, DepthOption)
+mkAccumulationContext StageAttrs{..} = (ContextColorOption blend (pure True), DepthOption depthFunc saDepthWrite)
   where
-    depthWrite  = saDepthWrite sa
-    depthFunc   = case saDepthFunc sa of
+    depthFunc   = case saDepthFunc of
         D_Equal     -> Equal
         D_Lequal    -> Lequal
-    blend       = case saBlend sa of
+    blend       = case saBlend of
         Nothing     -> NoBlending
-        Just (src,dst)  -> Blend (FuncAdd,FuncAdd) ((srcF,dstF),(srcF,dstF)) zero'
+        Just (src,dst)  -> BlendRgbAlpha (FuncAdd,FuncAdd) (BlendingFactors srcF dstF, BlendingFactors srcF dstF) (V4 0 0 0 0)
           where
             srcF    = cvt src
             dstF    = cvt dst
@@ -68,307 +226,10 @@ mkAccumulationContext sa = AccumulationContext Nothing $ DepthOp depthFunc depth
         B_SrcColor          -> SrcColor
         B_Zero              -> Zero
 
-{-
-data CommonAttrs
-    = CommonAttrs
-    { caSkyParms        :: !()
-    , caFogParms        :: !()
-    , caPortal          :: !Bool
-    , caSort            :: !Int             -- done
-    , caEntityMergable  :: !Bool
-    , caFogOnly         :: !Bool
-    , caCull            :: !CullType
-    , caDeformVertexes  :: ![Deform]
-    , caNoMipMaps       :: !Bool
-    , caPolygonOffset   :: !Bool            -- done
-    , caStages          :: ![StageAttrs]
-    }
+mkStage uni ca sa = do
+  primitiveStream <- toPrimitiveStream id
+  fragmentStream <- rasterize (const $ mkRasterContext ca) (mkVertexShader uni ca sa <$> primitiveStream)
+  let filteredFragmentStream = filterFragments (mkFilterFunction sa) fragmentStream
+  drawContextColorDepth (const $ mkAccumulationContext sa) $ withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) (mkFragmentShader sa <$> filteredFragmentStream)
 
-data StageAttrs
-    = StageAttrs
-    { saBlend       :: !(Maybe (Blending,Blending))
-    , saRGBGen      :: !RGBGen
-    , saAlphaGen    :: !AlphaGen
-    , saTCGen       :: !TCGen
-    , saTCMod       :: ![TCMod]
-    , saTexture     :: !StageTexture
-    , saDepthWrite  :: !Bool
-    , saDepthFunc   :: !DepthFunction
-    , saAlphaFunc   :: !(Maybe AlphaFunction)
-    }
--}
-
-v3V :: V3F -> Exp V V3F
-v3V = Const
-
-floatV :: Float -> Exp V Float
-floatV = Const
-
-floatF :: Float -> Exp F Float
-floatF = Const
-
-mkColor :: CommonAttrs -> StageAttrs -> Exp V V4F -> Exp V V4F
-mkColor ca sa rgbaV = snoc' rgb alpha
-  where
-    entityRGB       = Uni (IV3F "entityRGB") :: Exp V V3F
-    entityAlpha     = Uni (IFloat "entityAlpha") :: Exp V Float
-    identityLight   = Uni (IFloat "identityLight") :: Exp V Float
-    --red             = Const $ V3 1 0 0
-    green           = Const $ V3 0 1 0
-    V4 rV gV bV aV  = unpack' rgbaV
-    rgb = case saRGBGen sa of
-        RGB_Wave w              -> let c = mkWave w in pack' $ V3 c c c
-        RGB_Const r g b         -> v3V $ V3 r g b
-        RGB_Identity            -> v3V one'
-        RGB_IdentityLighting    -> pack' $ V3 identityLight identityLight identityLight
-        RGB_Entity              -> entityRGB
-        RGB_OneMinusEntity      -> v3V one' @- entityRGB
-        RGB_ExactVertex         -> pack' $ V3 rV gV bV
-        RGB_Vertex              -> (pack' $ V3 rV gV bV) @* identityLight
-        RGB_LightingDiffuse     -> green -- TODO
-        {-  input:
-                entity: ambientLight
-                        directedLight
-                        lightDir
-                model:  position
-                        normal
-        -}
-        RGB_OneMinusVertex      -> v3V one' @- ((pack' $ V3 rV gV bV) @* identityLight)
-
-    alpha = case saAlphaGen sa of
-        A_Wave w            -> let a = mkWave w in clamp' a (floatV 0) (floatV 1)
-        A_Const a           -> floatV a
-        A_Portal            -> floatV 1 -- TODO
-        A_Identity          -> floatV 1
-        A_Entity            -> entityAlpha
-        A_OneMinusEntity    -> floatV 1 @- entityAlpha
-        A_Vertex            -> aV
-        A_LightingSpecular  -> floatV 1 -- TODO
-        {-  input:
-                model:  position
-                        normal
-                user:   viewOrigin
-        -}
-        A_OneMinusVertex    -> floatV 1 @- aV
-
-mkWave' :: Exp V Float -> Wave -> Exp V Float
-mkWave' off (Wave wFunc base amplitude phase freq) = floatV base @+ a @* floatV amplitude
-  where
-    time        = Uni (IFloat "time") :: Exp V Float
-    u           = off @+ floatV phase @+ floatV freq @* time
-    uv          = pack' $ V2 u (Const 0)
-    V4 v _ _ _  = unpack' $ texture' sampler uv
-    a           = v @* floatV 2 @- floatV 1
-    sampler     = Sampler LinearFilter Repeat $ TextureSlot name (Texture2D (Float RGBA) n1)
-    name        = case wFunc of
-        WT_Sin              -> "SinTable"
-        WT_Triangle         -> "TriangleTable"
-        WT_Square           -> "SquareTable"
-        WT_Sawtooth         -> "SawToothTable"
-        WT_InverseSawtooth  -> "InverseSawToothTable"
-        WT_Noise            -> "Noise"
-
-mkWave :: Wave -> Exp V Float
-mkWave = mkWave' $ floatV 0
-{-
-data Deform
-    = D_AutoSprite
-    | D_AutoSprite2
-    | D_Normal !Float !Float
-    | D_ProjectionShadow
-    | D_Text0
-    | D_Text1
-    | D_Text2
-    | D_Text3
-    | D_Text4
-    | D_Text5
-    | D_Text6
-    | D_Text7
--}
-mkDeform :: Exp V V2F -> Exp V V3F -> Exp V V3F -> Deform -> Exp V V3F
-mkDeform uv normal pos d = case d of
-    D_Move (Vec3 x y z) w   -> pos @+ v3V (V3 x y z) @* mkWave w
-    D_Wave spread w@(Wave _ _ _ _ f)
-        | f < 0.000001  -> pos @+ normal @* mkWave w
-        | otherwise     ->
-            let V3 x y z    = unpack' pos
-                off         = (x @+ y @+ z) @* floatV spread
-            in pos @+ normal @* mkWave' off w
-    D_Bulge w h s   -> let time     = Uni (IFloat "time") :: Exp V Float
-                           V2 u _   = unpack' uv
-                           now      = time @* floatV s
-                           off      = u @* floatV w @+ now
-                       in pos @+ normal @* sin' off @* floatV h
-    _ -> pos
-
-{-
-data TCMod
-    = TM_EntityTranslate
--}
-mkTCMod :: Exp V V3F -> Exp V V2F -> TCMod -> Exp V V2F
-mkTCMod pos uv m = trace (show m) $ case m of
-    TM_Scroll su sv -> uv @+ (Const $ V2 su sv :: Exp V V2F) @* (Uni (IFloat "time") :: Exp V Float)
-    TM_Scale su sv  -> uv @* (Const $ V2 su sv :: Exp V V2F)
-    TM_Stretch w    -> let p    = floatV 1 @/ mkWave w 
-                           v0_5 = floatV 0.5
-                           off  = v0_5 @- v0_5 @* p
-                       in uv @* p @+ off
-    TM_Rotate speed -> let time = Uni (IFloat "time") :: Exp V Float
-                           fi   = floatV (-speed * pi / 180) @* time
-                           s    = sin' fi
-                           ms   = s @* floatV (-1)
-                           c    = cos' fi
-                           mA   = pack' $ V2 c s
-                           mB   = pack' $ V2 ms c
-                           m    = pack' $ V2 mA mB :: Exp V M22F
-                           v0_5 = floatV 0.5
-                           off  = pack' $ V2 (v0_5 @- v0_5 @* c @+ v0_5 @* s) (v0_5 @- v0_5 @* s @- v0_5 @* c)
-                       in m @*. uv @+ off
-    TM_Transform m00 m01 m10 m11 t0 t1  -> let V2 u v   = unpack' uv
-                                               u'       = u @* floatV m00 @+ v @* floatV m10 @+ floatV t0
-                                               v'       = u @* floatV m01 @+ v @* floatV m11 @+ floatV t1
-                                           in pack' $ V2 u' v'
-    TM_Turb base amp phase freq ->  let V2 u v      = unpack' uv
-                                        V3 x y z    = unpack' pos
-                                        time        = Uni (IFloat "time") :: Exp V Float
-                                        now         = floatV phase @+ time @* floatV freq
-                                        offU        = floatV (2 * pi) @* ((x @+ z) @* floatV (0.125 / 128) @+ now)
-                                        offV        = floatV (2 * pi) @* (y @* floatV (0.125 / 128) @+ now)
-                                    in uv @+ sin' (pack' $ V2 offU offV) @* floatV amp
-    _ -> uv
-
-mkTexCoord :: Exp V V3F -> Exp V V3F -> StageAttrs -> Exp V V2F -> Exp V V2F -> Exp V V2F
-mkTexCoord pos normal sa uvD uvL = foldl' (mkTCMod pos) uv $ saTCMod sa
-  where
-    uv = case saTCGen sa of
-        TG_Base         -> uvD
-        TG_Lightmap     -> uvL
-        TG_Environment  ->  let viewOrigin  = Uni (IV3F "viewOrigin")
-                                viewer      = normalize' $ viewOrigin @- pos
-                                d           = normal @. viewer
-                                reflected   = normal @* floatV 2 @*d @- viewer
-                                V3 _ y z    = unpack' reflected
-                                v0_5        = floatV 0.5
-                            in pack' $ V2 (v0_5 @+ y @* v0_5) (v0_5 @- z @* v0_5)
-        TG_Vector (Vec3 sx sy sz) (Vec3 tx ty tz)   -> let s    = Const $ V3 sx sy sz :: Exp V V3F
-                                                           t    = Const $ V3 tx ty tz :: Exp V V3F
-                                                       in pack' $ V2 (pos @. s) (pos @. t)
-
-mkVertexShader :: CommonAttrs -> StageAttrs -> Exp V (V3F,V3F,V2F,V2F,V4F) -> VertexOut () (V2F,V4F)
-mkVertexShader ca sa pndlc = VertexOut screenPos (Const 1) ZT (Smooth uv:.Smooth color:.ZT)
-  where
-    worldMat    = Uni (IM44F "worldMat")
-    viewMat     = Uni (IM44F "viewMat")
-    viewProj    = Uni (IM44F "viewProj")
-    (p,n,d,l,c) = untup5 pndlc
-    screenPos   = viewProj @*. worldMat @*. snoc pos 1
-    pos         = foldl' (mkDeform d n) p $ caDeformVertexes ca
-    norm        = drop4 $ viewMat @*. worldMat @*. snoc n 0
-    uv          = mkTexCoord pos n sa d l
-    color       = mkColor ca sa c
-
-mkFragmentShader :: StageAttrs -> Exp F (V2F,V4F) -> FragmentOut (Depth Float :+: Color V4F :+: ZZ)
-mkFragmentShader sa uvrgba = FragmentOutRastDepth $ color :. ZT
-  where
-    (uv,rgba)   = untup2 uvrgba
-    stageTex    = saTexture sa
-    stageTexN   = SB.pack $ "Tex_" ++ show (crc32 $ SB.pack $ show stageTex)
-    color       = case stageTex of
-        ST_WhiteImage   -> rgba
-        ST_Lightmap     -> rgba @* texColor ClampToEdge "LightMap"
-        ST_Map {}       -> rgba @* texColor Repeat  stageTexN
-        ST_ClampMap {}  -> rgba @* texColor ClampToEdge stageTexN
-        ST_AnimMap {}   -> rgba @* texColor Repeat  stageTexN
-    texColor em name = texture' sampler uv
-      where
-        sampler     = Sampler LinearFilter em $ TextureSlot name (Texture2D (Float RGBA) n1)
-
-mkFilterFunction :: StageAttrs -> FragmentFilter (V2F,V4F)
-mkFilterFunction sa = case saAlphaFunc sa of
-    Nothing -> PassAll
-    Just f  -> Filter $ \uvrgba ->
-        let
-            V4 _ _ _ a  = unpack' color
-            (uv,rgba)   = untup2 uvrgba
-            stageTex    = saTexture sa
-            stageTexN   = SB.pack $ "Tex_" ++ show (crc32 $ SB.pack $ show stageTex)
-            color       = case stageTex of
-                ST_WhiteImage   -> rgba
-                ST_Lightmap     -> rgba @* texColor ClampToEdge "LightMap"
-                ST_Map {}       -> rgba @* texColor Repeat  stageTexN
-                ST_ClampMap {}  -> rgba @* texColor ClampToEdge stageTexN
-                ST_AnimMap {}   -> rgba @* texColor Repeat  stageTexN
-            texColor em name = texture' sampler uv
-              where
-                sampler     = Sampler LinearFilter em $ TextureSlot name (Texture2D (Float RGBA) n1)
-        in case trace ("alpha filter: " ++ show f) f of
-            A_Gt0   -> a @> floatF 0
-            A_Lt128 -> a @< floatF 0.5
-            A_Ge128 -> a @>= floatF 0.5
-
-mkStage :: ByteString -> CommonAttrs -> Exp Obj (FrameBuffer 1 (Float,V4F)) -> StageAttrs -> Exp Obj (FrameBuffer 1 (Float,V4F))
-mkStage name ca prevFB sa = Accumulate aCtx fFun fSh (Rasterize rCtx (Transform vSh input)) prevFB
-  where
-    input   = Fetch name Triangles (IV3F "position", IV3F "normal", IV2F "diffuseUV", IV2F "lightmapUV", IV4F "color")
-    rCtx    = mkRasterContext ca
-    aCtx    = mkAccumulationContext sa
-    vSh     = mkVertexShader ca sa
-    fSh     = mkFragmentShader sa
-    fFun    = mkFilterFunction sa
-
-mkShader :: Exp Obj (FrameBuffer 1 (Float,V4F)) -> (ByteString,CommonAttrs) -> Exp Obj (FrameBuffer 1 (Float,V4F))
-mkShader fb (name,ca) = foldl' (mkStage name ca) fb $ caStages ca
-
-q3GFX :: [(ByteString,CommonAttrs)] -> Exp Obj (FrameBuffer 1 (Float,V4F))
-q3GFX shl = {-blurVH $ PrjFrameBuffer "" tix0 $ -}errorShader $ foldl' mkShader clear ordered
-  where
-    ordered = sortBy (\(_,a) (_,b) -> caSort a `compare` caSort b) shl
-    clear   = FrameBuffer (DepthImage n1 1000:.ColorImage n1 (zero'::V4F):.ZT)
-
-errorShader :: Exp Obj (FrameBuffer 1 (Float,V4F)) -> Exp Obj (FrameBuffer 1 (Float,V4F))
-errorShader fb = Accumulate fragCtx PassAll frag rast $ errorShaderFill fb
-  where
-    offset  = NoOffset--Offset (0) (-10)
-    fragCtx = AccumulationContext Nothing $ DepthOp Lequal True:.ColorOp NoBlending (one' :: V4B):.ZT
-    rastCtx = TriangleCtx CullNone (PolygonLine 1) offset LastVertex
-    rast    = Rasterize rastCtx prims
-    prims   = Transform vert input
-    input   = Fetch "missing shader" Triangles (IV3F "position", IV4F "color")
-    worldMat = Uni (IM44F "worldMat")
-    viewProj = Uni (IM44F "viewProj")
-
-    vert :: Exp V (V3F,V4F) -> VertexOut () V4F
-    vert pc = VertexOut v4 (Const 1) ZT (Smooth c:.ZT)
-      where
-        v4    = viewProj @*. worldMat @*. snoc p 1
-        (p,c) = untup2 pc
-
-    frag :: Exp F V4F -> FragmentOut (Depth Float :+: Color V4F :+: ZZ)
-    frag v = FragmentOutRastDepth $ v' :. ZT
-      where
-        V4 r g b _  = unpack' v
-        one         = floatF 1
-        v'          = pack' $ V4 (one @- r) (one @- g) (one @- b) one
-
-errorShaderFill :: Exp Obj (FrameBuffer 1 (Float,V4F)) -> Exp Obj (FrameBuffer 1 (Float,V4F))
-errorShaderFill fb = Accumulate fragCtx PassAll frag rast fb
-  where
-    blend   = Blend (FuncAdd,Min) ((One,One),(One,One)) one'
-    fragCtx = AccumulationContext Nothing $ DepthOp Less False:.ColorOp blend (one' :: V4B):.ZT
-    rastCtx = TriangleCtx CullNone PolygonFill NoOffset LastVertex
-    rast    = Rasterize rastCtx prims
-    prims   = Transform vert input
-    input   = Fetch "missing shader" Triangles (IV3F "position", IV4F "color")
-    worldMat = Uni (IM44F "worldMat")
-    viewProj = Uni (IM44F "viewProj")
-
-    vert :: Exp V (V3F,V4F) -> VertexOut () V4F
-    vert pc = VertexOut v4 (Const 1) ZT (Smooth c':.ZT)
-      where
-        v4    = viewProj @*. worldMat @*. snoc p 1
-        (p,c) = untup2 pc
-        V4 r g b _  = unpack' c
-        c'          = pack' $ V4 r g b $ floatV 0.5
-
-    frag :: Exp F V4F -> FragmentOut (Depth Float :+: Color V4F :+: ZZ)
-    frag v = FragmentOutRastDepth $ v :. ZT
+mkShader uni ca = mapM_ (mkStage uni ca) $ caStages ca

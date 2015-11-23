@@ -66,18 +66,40 @@ missingMaterial uniformBuffer = do
   --drawContextColor (const (ContextColorOption NoBlending (pure True))) fragmentStream2
   drawContextColorDepth (const (ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream3
 
+--------------
+-- Copy of lookAt from linear with normalize replaced with signorm 
+lookAt' eye center up =
+  V4 (V4 (xa^._x)  (xa^._y)  (xa^._z)  xd)
+     (V4 (ya^._x)  (ya^._y)  (ya^._z)  yd)
+     (V4 (-za^._x) (-za^._y) (-za^._z) zd)
+     (V4 0         0         0          1)
+  where za = signorm $ center - eye
+        xa = signorm $ cross za up
+        ya = cross xa za
+        xd = -dot xa eye
+        yd = -dot ya eye
+        zd = dot za eye
+
+make3d eye center up (V3 x y z, _) = projMat !*! viewMat !* V4 x y z 1
+  where
+    viewMat = lookAt' eye center up
+    projMat = perspective (pi/3) 1 1 10000
+
+getProjectedFragments size eye center up sf = do
+  primitiveStream <- toPrimitiveStream sf
+  let primitiveStream2 = fmap (\pos2d -> (make3d eye center up pos2d, pos2d)) primitiveStream
+  rasterize (const (FrontAndBack, ViewPort (V2 0 0) (V2 size size), DepthRange 0 1)) primitiveStream2
+
 compileMaterial :: (MonadIO m, MonadException m) => Buffer os (Uniform (B3 Float, B3 Float, B3 Float)) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF A)
-compileMaterial uniformBuffer shaderInfo = do 
+compileMaterial uniformBuffer shaderInfo = do
  liftIO (putStr ".")
- shader <- compileShader $ do
+ compileShader $ do
   (eye,center,up) <- getUniform (const (uniformBuffer,0))
   fragmentStream <- getProjectedFragments 600 eye center up id
   let fragmentStream2 = fmap ((\(_,V4 r g b a) -> V3 r g b)) fragmentStream
       fragmentStream3 = withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) fragmentStream2
-  --drawContextColor (const (ContextColorOption NoBlending (pure True))) fragmentStream2
   drawContextColorDepth (const (ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream3
- return $ \s -> do
-    shader s -- TODO
+--------------
 
 renderQuake :: Vec3 -> BSPLevel -> T.Trie CommonAttrs -> IO ()
 renderQuake startPos bsp@BSPLevel{..} shaderInfo =
@@ -125,16 +147,6 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo =
         surfaces
       ]
 
-getProjectedFragments size eye center up sf = do
-  primitiveStream <- toPrimitiveStream sf
-  let primitiveStream2 = fmap (\pos2d -> (make3d eye center up pos2d, pos2d)) primitiveStream
-  rasterize (const (FrontAndBack, ViewPort (V2 0 0) (V2 size size), DepthRange 0 1)) primitiveStream2
-
-make3d eye center up (V3 x y z, _) = projMat !*! viewMat !* V4 x y z 1
-  where
-    viewMat = lookAt' eye center up
-    projMat = perspective (pi/3) 1 1 10000
-
 renderLoop uniformBuffer s renderings = do
   -- read input
   (mx,my) <- GLFW.getCursorPos
@@ -151,6 +163,9 @@ renderLoop uniformBuffer s renderings = do
 
   let s'@(eye,center,up,_) = calcCam dt (realToFrac mx, realToFrac my) keys s
       toV3 (Vec3 x y z) = V3 x y z
+      viewMat = lookAt' (toV3 eye) (toV3 center) (toV3 up)
+      projMat = perspective (pi/3::Float) 1 1 10000
+      mvp = projMat !*! viewMat
   writeBuffer uniformBuffer 0 [(toV3 eye, toV3 center, toV3 up)]
 
   --liftIO $ putStrLn "Hello 3"
@@ -161,17 +176,4 @@ renderLoop uniformBuffer s renderings = do
     liftIO $ do
       GLFWb.pollEvents
     renderLoop uniformBuffer s' renderings
-
--- Copy of lookAt from linear with normalize replaced with signorm 
-lookAt' eye center up =
-  V4 (V4 (xa^._x)  (xa^._y)  (xa^._z)  xd)
-     (V4 (ya^._x)  (ya^._y)  (ya^._z)  yd)
-     (V4 (-za^._x) (-za^._y) (-za^._z) zd)
-     (V4 0         0         0          1)
-  where za = signorm $ center - eye
-        xa = signorm $ cross za up
-        ya = cross xa za
-        xd = -dot xa eye
-        yd = -dot ya eye
-        zd = dot za eye
 
