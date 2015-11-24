@@ -73,7 +73,6 @@ missingMaterial uniformBuffer = do
   let fragmentStream2 = withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) fragmentStream
   drawContextColorDepth (const (ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream2
 
---mkShader uni ca = mapM_ (mkStage uni ca) $ caStages ca
 compileMaterial :: (MonadIO m, MonadException m) => Buffer os (Uniform UniInput) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF A)
 compileMaterial uniformBuffer shaderInfo = do
  liftIO (putStr ".")
@@ -83,6 +82,7 @@ compileMaterial uniformBuffer shaderInfo = do
   mkStage uni shaderInfo sa
  return $ \s -> mapM_ ($ s) stages
 -}
+
  compileShader $ do
   uni <- getUniform (const (uniformBuffer,0))
   mkShader uni shaderInfo
