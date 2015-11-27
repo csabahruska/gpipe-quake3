@@ -17,6 +17,7 @@ import qualified Data.Trie as T
 import qualified Data.Vector as V
 import Data.Vect hiding (Vector)
 import Data.Bits
+import Data.Int
 import BSP
 import Camera
 import Q3Patch
@@ -56,24 +57,24 @@ convertSurface BSPLevel{..} indexBufferQ3 vertexBufferQ3 patchInfo sf@Surface{..
 type CF = ContextFormat RGBAFloat Depth
 type AttInput = (B3 Float, B3 Float, B2 Float, B2 Float, B4 Float)
 type A = PrimitiveArray Triangles AttInput
-type UniInput = (B3 Float, B Float, B Float, B Float, B3 Float, B3 Float, B3 Float)
+type UniInput = (B2 Int32, (B3 Float, B Float, B Float, B Float, B3 Float, B3 Float, B3 Float))
 
-missingMaterial :: (MonadIO m, MonadException m) => Buffer os (Uniform UniInput) -> ContextT w os CF m (CompiledShader os CF A)
+missingMaterial :: (MonadIO m, MonadException m) => Buffer os (Uniform UniInput) -> ContextT w os CF m (CompiledShader os CF (V2 Int,A))
 missingMaterial uniformBuffer = do 
  liftIO (putStr "-")
  compileShader $ do
   uni <- getUniform (const (uniformBuffer,0))
-  primitiveStream <- toPrimitiveStream id
+  primitiveStream <- toPrimitiveStream snd
   let viewMat = lookAt' (viewOrigin uni) (viewTarget uni) (viewUp uni)
-      projMat = perspective (pi/3) 1 1 10000
+      V2 w h  = windowSize uni
+      projMat = perspective (pi/3) (toFloat w / toFloat h) 1 10000
       make3d (V3 x y z) = projMat !*! viewMat !* V4 x y z 1
       primitiveStream2 = fmap (\(pos,_,_,_,color) -> (make3d pos, color)) primitiveStream
-      size = 600
-  fragmentStream <- rasterize (const (FrontAndBack, ViewPort (V2 0 0) (V2 size size), DepthRange 0 1)) primitiveStream2
+  fragmentStream <- rasterize (\(V2 w h,_) -> (FrontAndBack, ViewPort (V2 0 0) (V2 w h), DepthRange 0 1)) primitiveStream2
   let fragmentStream2 = withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) fragmentStream
   drawContextColorDepth (const (ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream2
 
-compileMaterial :: (MonadIO m, MonadException m) => Buffer os (Uniform UniInput) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF A)
+compileMaterial :: (MonadIO m, MonadException m) => Buffer os (Uniform UniInput) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF (V2 Int,A))
 compileMaterial uniformBuffer shaderInfo = do
  liftIO (putStr ".")
 {-
@@ -82,14 +83,23 @@ compileMaterial uniformBuffer shaderInfo = do
   mkStage uni shaderInfo sa
  return $ \s -> mapM_ ($ s) stages
 -}
+{-
+input samplers:
 
+        WT_Sin              -> "SinTable"
+        WT_Triangle         -> "TriangleTable"
+        WT_Square           -> "SquareTable"
+        WT_Sawtooth         -> "SawToothTable"
+        WT_InverseSawtooth  -> "InverseSawToothTable"
+        WT_Noise            -> "Noise"
+-}
  compileShader $ do
   uni <- getUniform (const (uniformBuffer,0))
   mkShader uni shaderInfo
 
 renderQuake :: Vec3 -> BSPLevel -> T.Trie CommonAttrs -> IO ()
 renderQuake startPos bsp@BSPLevel{..} shaderInfo =
-  runContextT GLFW.newContext (ContextFormatColorDepth RGBA32F Depth32F) $ do
+  runContextT GLFW.newContext (ContextFormatColorDepth RGBA32F Depth32) $ do
     -- pre tesselate patches and append to static draw verices and indices
     let patches     = map (tessellatePatch blDrawVertices 5) $ V.toList blSurfaces
         (verticesQ3,indicesQ3) = mconcat $ (blDrawVertices,blDrawIndices):patches
@@ -113,26 +123,21 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo =
 
     --  create shader for each material
     usedShaders <- mapM (\Shader{..} -> maybe (return missingMaterialShader) (compileMaterial uniformBuffer) $ T.lookup shName shaderInfo) blShaders
-    let surfaces = do
+    let surfaces ctx = do
           surface0 <- zipWithM (convertSurface bsp indexBufferQ3 vertexBufferQ3) patchInfo $ V.toList blSurfaces
           -- group surfaces by material
           let surface1 = Map.unionsWith mappend . map (uncurry Map.singleton) $ surface0
-              surface2 = Map.mapWithKey (\shader surface -> (caSort <$> T.lookup (shName $ blShaders V.! shader) shaderInfo, (usedShaders V.! shader) surface)) surface1
+              surface2 = Map.mapWithKey (\shader surface -> (caSort <$> T.lookup (shName $ blShaders V.! shader) shaderInfo, (usedShaders V.! shader) (ctx,surface))) surface1
               -- sort surfaces by render queue
               sorted = concat $ Map.elems $ Map.unionsWith mappend [Map.singleton k [v] | (k,v) <- Map.elems surface2]
               allSurf = sequence_ sorted
           allSurf
 
     liftIO $ putStrLn "Hello 1"
-    renderLoop uniformBuffer (s0 startPos) [
-      do
-        --liftIO $ putStrLn "Hello 2"
-        clearContextColor 0
-        clearContextDepth 10000
-        surfaces
-      ]
+    Just t0 <- liftIO $ GLFWb.getTime
+    renderLoop uniformBuffer (s0 startPos) t0 surfaces
 
-renderLoop uniformBuffer s renderings = do
+renderLoop uniformBuffer s t renderings = do
   -- read input
   (mx,my) <- GLFW.getCursorPos
   let keyIsPressed k = fmap (== GLFW.KeyState'Pressed) $ GLFW.getKey k
@@ -141,29 +146,28 @@ renderLoop uniformBuffer s renderings = do
                  <*> keyIsPressed GLFW.Key'Down
                  <*> keyIsPressed GLFW.Key'Right
                  <*> keyIsPressed GLFW.Key'RightShift
-  dt <- liftIO $ do
-    Just t <- GLFWb.getTime
-    GLFWb.setTime 0
-    return t
+  Just t' <- liftIO $ GLFWb.getTime
 
-  let s'@(eye,center,up,_) = calcCam dt (realToFrac mx, realToFrac my) keys s
+  size <- getContextBuffersSize
+  let s'@(eye,center,up,_) = calcCam (t'-t) (realToFrac mx, realToFrac my) keys s
       toV3 (Vec3 x y z) = V3 x y z
-      viewMat = lookAt' (toV3 eye) (toV3 center) (toV3 up)
-      projMat = perspective (pi/3::Float) 1 1 10000
-      mvp = projMat !*! viewMat
 {-
   uniform tuple:
       entityRGB, entityAlpha, identityLight, time,  viewOrigin, viewTarget, viewUp
       (V3 Float, Float,       Float,         Float, V3 Float,   V3 Float,   V3 Float)
 -}
-  writeBuffer uniformBuffer 0 [(V3 1 1 1, 1, 1, 0, toV3 eye, toV3 center, toV3 up)]
+  writeBuffer uniformBuffer 0 [(fromIntegral <$> size,(V3 1 1 1, 1, 1, realToFrac t', toV3 eye, toV3 center, toV3 up))]
 
   --liftIO $ putStrLn "Hello 3"
-  mapM_ render renderings
+  render $ do
+    clearContextColor 0.5
+    clearContextDepth 1
+    renderings size
+
   swapContextBuffers
   closeRequested <- GLFW.windowShouldClose
   unless closeRequested $ do
     liftIO $ do
       GLFWb.pollEvents
-    renderLoop uniformBuffer s' renderings
+    renderLoop uniformBuffer s' t' renderings
 

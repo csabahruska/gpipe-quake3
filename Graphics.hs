@@ -13,7 +13,7 @@ import Material hiding (Blending)
 
 import Graphics.GPipe as GPipe
 
-mkColor uni ca sa (V4 rV gV bV aV) = V4 cr cg cb alpha
+mkColor uni ca sa x@(V4 rV gV bV aV) = x--V4 cr cg cb alpha
   where
     green = V3 0 1 0
     V3 cr cg cb = case saRGBGen sa of
@@ -55,7 +55,7 @@ mkWave' uni off (Wave wFunc base amplitude phase freq) = realToFrac base + a * r
   where
     u           = off + realToFrac phase + realToFrac freq * time uni
     uv          = V2 u 0
-    V4 v _ _ _  = V4 1 1 1 1 --TODO unpack' $ texture' sampler uv
+    V4 v _ _ _  = V4 0.2 0 0 0 --TODO unpack' $ texture' sampler uv
     a           = v * 2 - 1
     --sampler     = Sampler LinearFilter Repeat $ TextureSlot name (Texture2D (Float RGBA) n1)
     name        = case wFunc of
@@ -134,13 +134,14 @@ lookAt' eye center up =
         yd = -dot ya eye
         zd = dot za eye
 
-entityRGB       (a,_,_,_,_,_,_) = a
-entityAlpha     (_,a,_,_,_,_,_) = a
-identityLight_  (_,_,a,_,_,_,_) = a
-time            (_,_,_,a,_,_,_) = a
-viewOrigin      (_,_,_,_,a,_,_) = a
-viewTarget      (_,_,_,_,_,a,_) = a
-viewUp          (_,_,_,_,_,_,a) = a
+windowSize      (a,(_,_,_,_,_,_,_)) = a
+entityRGB       (_,(a,_,_,_,_,_,_)) = a
+entityAlpha     (_,(_,a,_,_,_,_,_)) = a
+identityLight_  (_,(_,_,a,_,_,_,_)) = a
+time            (_,(_,_,_,a,_,_,_)) = a
+viewOrigin      (_,(_,_,_,_,a,_,_)) = a
+viewTarget      (_,(_,_,_,_,_,a,_)) = a
+viewUp          (_,(_,_,_,_,_,_,a)) = a
 {-
 uniform tuple:
       entityRGB, entityAlpha, identityLight, time,  viewOrigin, viewTarget, viewUp
@@ -150,7 +151,8 @@ uniform tuple:
 mkVertexShader uni ca sa (p@(V3 x y z),n,d,l,c) = (screenPos, (uv, color))
   where
     viewMat     = lookAt' (viewOrigin uni) (viewTarget uni) (viewUp uni)
-    projMat     = perspective (pi/3) 1 1 10000
+    V2 w h      = windowSize uni
+    projMat     = perspective (pi/3) (toFloat w / toFloat h) 1 10000
     screenPos   = projMat !*! viewMat !* V4 x y z 1
     pos         = foldl' (mkDeform uni d n) p $ caDeformVertexes ca
     uv          = mkTexCoord uni pos n sa d l
@@ -183,7 +185,7 @@ mkFilterFunction sa (uv,rgba) = case saAlphaFunc sa of
                 ST_Map {}       -> rgba * texColor Repeat  stageTexN
                 ST_ClampMap {}  -> rgba * texColor ClampToEdge stageTexN
                 ST_AnimMap {}   -> rgba * texColor Repeat  stageTexN
-            texColor em name = V4 1 1 1 1-- TODO: texture' sampler uv
+            texColor em name = V4 1 0 0 1-- TODO: texture' sampler uv
               where
                 --sampler     = Sampler LinearFilter em $ TextureSlot name (Texture2D (Float RGBA) n1)
         in case f of
@@ -191,14 +193,12 @@ mkFilterFunction sa (uv,rgba) = case saAlphaFunc sa of
             A_Lt128 -> a GPipe.<* 0.5
             A_Ge128 -> a >=* 0.5
 
-mkRasterContext :: CommonAttrs -> (Side, ViewPort, DepthRange)
-mkRasterContext ca = (cull, ViewPort (V2 0 0) (V2 size size), DepthRange 0 1)
+mkRasterContext ca (V2 w h,_) = (cull, ViewPort (V2 0 0) (V2 w h), DepthRange 0 1)
   where
-    size = 600
     -- TODO: offset  = if caPolygonOffset ca then Offset (-1) (-2) else NoOffset
     cull    = case caCull ca of
-        CT_FrontSided   -> Front
-        CT_BackSided    -> Back
+        CT_FrontSided   -> Back --Front
+        CT_BackSided    -> Front --Back
         CT_TwoSided     -> FrontAndBack
 
 mkAccumulationContext :: StageAttrs -> (ContextColorOption RGBAFloat, DepthOption)
@@ -209,7 +209,7 @@ mkAccumulationContext StageAttrs{..} = (ContextColorOption blend (pure True), De
         D_Lequal    -> Lequal
     blend       = case saBlend of
         Nothing     -> NoBlending
-        Just (src,dst)  -> BlendRgbAlpha (FuncAdd,FuncAdd) (BlendingFactors srcF dstF, BlendingFactors srcF dstF) (V4 0 0 0 0)
+        Just (src,dst)  -> BlendRgbAlpha (FuncAdd,FuncAdd) (BlendingFactors srcF dstF, BlendingFactors srcF dstF) (V4 1 1 1 1)
           where
             srcF    = cvt src
             dstF    = cvt dst
@@ -227,9 +227,10 @@ mkAccumulationContext StageAttrs{..} = (ContextColorOption blend (pure True), De
         B_Zero              -> Zero
 
 mkStage uni ca sa = do
-  primitiveStream <- toPrimitiveStream id
-  fragmentStream <- rasterize (const $ mkRasterContext ca) (mkVertexShader uni ca sa <$> primitiveStream)
+  primitiveStream <- toPrimitiveStream snd
+  fragmentStream <- rasterize (mkRasterContext ca) (mkVertexShader uni ca sa <$> primitiveStream)
   let filteredFragmentStream = filterFragments (mkFilterFunction sa) fragmentStream
+  --drawContextColorDepth (const $ mkAccumulationContext sa) $ withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z + if caPolygonOffset ca then -2 else 0)) (mkFragmentShader sa <$> filteredFragmentStream)
   drawContextColorDepth (const $ mkAccumulationContext sa) $ withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) (mkFragmentShader sa <$> filteredFragmentStream)
 
 mkShader uni ca = mapM_ (mkStage uni ca) $ caStages ca
