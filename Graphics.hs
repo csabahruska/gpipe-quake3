@@ -13,11 +13,11 @@ import Material hiding (Blending)
 
 import Graphics.GPipe as GPipe
 
-mkColor uni ca sa x@(V4 rV gV bV aV) = x--V4 cr cg cb alpha
+mkColor wt uni ca sa x@(V4 rV gV bV aV) = x--V4 cr cg cb alpha
   where
     green = V3 0 1 0
     V3 cr cg cb = case saRGBGen sa of
-        RGB_Wave w              -> let c = mkWave uni w in V3 c c c
+        RGB_Wave w              -> let c = mkWave wt uni w in V3 c c c
         RGB_Const r g b         -> V3 (realToFrac r) (realToFrac g) (realToFrac b)
         RGB_Identity            -> V3 1 1 1
         RGB_IdentityLighting    -> V3 (identityLight_ uni) (identityLight_ uni) (identityLight_ uni)
@@ -36,7 +36,7 @@ mkColor uni ca sa x@(V4 rV gV bV aV) = x--V4 cr cg cb alpha
         RGB_OneMinusVertex      -> V3 1 1 1 - V3 rV gV bV ^* identityLight_ uni
 
     alpha = case saAlphaGen sa of
-        A_Wave w            -> let a = mkWave uni w in clamp a 0 1
+        A_Wave w            -> let a = mkWave wt uni w in clamp a 0 1
         A_Const a           -> realToFrac a
         A_Portal            -> 1 -- TODO
         A_Identity          -> 1
@@ -51,41 +51,39 @@ mkColor uni ca sa x@(V4 rV gV bV aV) = x--V4 cr cg cb alpha
         -}
         A_OneMinusVertex    -> 1 - aV
 
-mkWave' uni off (Wave wFunc base amplitude phase freq) = realToFrac base + a * realToFrac amplitude :: VFloat
+mkWave' wt uni off (Wave wFunc base amplitude phase freq) = realToFrac base + a * realToFrac amplitude
   where
-    u           = off + realToFrac phase + realToFrac freq * time uni
-    uv          = V2 u 0
-    V4 v _ _ _  = V4 0.2 0 0 0 --TODO unpack' $ texture' sampler uv
-    a           = v * 2 - 1
-    --sampler     = Sampler LinearFilter Repeat $ TextureSlot name (Texture2D (Float RGBA) n1)
-    name        = case wFunc of
-        WT_Sin              -> "SinTable"
-        WT_Triangle         -> "TriangleTable"
-        WT_Square           -> "SquareTable"
-        WT_Sawtooth         -> "SawToothTable"
-        WT_InverseSawtooth  -> "InverseSawToothTable"
-        WT_Noise            -> "Noise"
+    u   = off + realToFrac phase + realToFrac freq * time uni :: VFloat
+    v   = sample1D (smp wt) (SampleLod 0) Nothing Nothing u
+    a   = v * 2 - 1
+    smp = case wFunc of
+        WT_Sin              -> wtSin
+        WT_Triangle         -> wtTriangle
+        WT_Square           -> wtSquare
+        WT_Sawtooth         -> wtSawTooth
+        WT_InverseSawtooth  -> wtInverseSawTooth
+        WT_Noise            -> wtNoise
 
-mkWave uni w = mkWave' uni 0 w :: VFloat
+mkWave wt uni w = mkWave' wt uni 0 w :: VFloat
 
-mkDeform uni uv normal pos d = case d of
-    D_Move (Vec3 x y z) w   -> pos + V3 (realToFrac x) (realToFrac y) (realToFrac z) ^* mkWave uni w
+mkDeform wt uni uv normal pos d = case d of
+    D_Move (Vec3 x y z) w   -> pos + V3 (realToFrac x) (realToFrac y) (realToFrac z) ^* mkWave wt uni w
     D_Wave spread w@(Wave _ _ _ _ f)
-        | f < 0.000001  -> pos + normal ^* mkWave uni w
+        | f < 0.000001  -> pos + normal ^* mkWave wt uni w
         | otherwise     ->
             let V3 x y z    = pos
                 off         = (x + y + z) * realToFrac spread
-            in pos + normal ^* mkWave' uni off w
+            in pos + normal ^* mkWave' wt uni off w
     D_Bulge w h s   -> let V2 u _   = uv
                            now      = time uni * realToFrac s
                            off      = u * realToFrac w + now
                        in pos + normal ^* (sin off * realToFrac h)
     _ -> pos
 
-mkTCMod uni pos uv m = case m of
+mkTCMod wt uni pos uv m = case m of
     TM_Scroll su sv -> uv + V2 (realToFrac su) (realToFrac sv) ^* time uni
     TM_Scale su sv  -> uv * V2 (realToFrac su) (realToFrac sv)
-    TM_Stretch w    -> let p    = 1 / mkWave uni w
+    TM_Stretch w    -> let p    = 1 / mkWave wt uni w
                            off  = 0.5 - 0.5 * p
                        in uv ^* p + V2 off off
     TM_Rotate speed -> let fi   = (-realToFrac speed * pi / 180) * time uni
@@ -109,7 +107,7 @@ mkTCMod uni pos uv m = case m of
                                     in uv + sin (V2 offU offV) ^* realToFrac amp
     _ -> uv
 
-mkTexCoord uni pos normal sa uvD uvL = foldl' (mkTCMod uni pos) uv $ saTCMod sa
+mkTexCoord wt uni pos normal sa uvD uvL = foldl' (mkTCMod wt uni pos) uv $ saTCMod sa
   where
     uv = case saTCGen sa of
         TG_Base         -> uvD
@@ -148,15 +146,15 @@ uniform tuple:
       (V3 Float, Float,       Float,         Float, V3 Float,   V3 Float,   V3 Float)
 -}
 
-mkVertexShader uni ca sa (p@(V3 x y z),n,d,l,c) = (screenPos, (uv, color))
+mkVertexShader wt uni ca sa (p@(V3 x y z),n,d,l,c) = (screenPos, (uv, color))
   where
     viewMat     = lookAt' (viewOrigin uni) (viewTarget uni) (viewUp uni)
     V2 w h      = windowSize uni
     projMat     = perspective (pi/3) (toFloat w / toFloat h) 1 10000
     screenPos   = projMat !*! viewMat !* V4 x y z 1
-    pos         = foldl' (mkDeform uni d n) p $ caDeformVertexes ca
-    uv          = mkTexCoord uni pos n sa d l
-    color       = mkColor uni ca sa c
+    pos         = foldl' (mkDeform wt uni d n) p $ caDeformVertexes ca
+    uv          = mkTexCoord wt uni pos n sa d l
+    color       = mkColor wt uni ca sa c
 
 mkFragmentShader sa (uv,rgba) = color
   where
@@ -193,7 +191,7 @@ mkFilterFunction sa (uv,rgba) = case saAlphaFunc sa of
             A_Lt128 -> a GPipe.<* 0.5
             A_Ge128 -> a >=* 0.5
 
-mkRasterContext ca (V2 w h,_) = (cull, ViewPort (V2 0 0) (V2 w h), DepthRange 0 1)
+mkRasterContext ca (V2 w h,_,_) = (cull, ViewPort (V2 0 0) (V2 w h), DepthRange 0 1)
   where
     -- TODO: offset  = if caPolygonOffset ca then Offset (-1) (-2) else NoOffset
     cull    = case caCull ca of
@@ -226,11 +224,30 @@ mkAccumulationContext StageAttrs{..} = (ContextColorOption blend (pure True), De
         B_SrcColor          -> SrcColor
         B_Zero              -> Zero
 
-mkStage uni ca sa = do
-  primitiveStream <- toPrimitiveStream snd
-  fragmentStream <- rasterize (mkRasterContext ca) (mkVertexShader uni ca sa <$> primitiveStream)
+mkStage wt uni ca sa = do
+  primitiveStream <- toPrimitiveStream (\(_,a,_) -> a)
+  fragmentStream <- rasterize (mkRasterContext ca) (mkVertexShader wt uni ca sa <$> primitiveStream)
   let filteredFragmentStream = filterFragments (mkFilterFunction sa) fragmentStream
   --drawContextColorDepth (const $ mkAccumulationContext sa) $ withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z + if caPolygonOffset ca then -2 else 0)) (mkFragmentShader sa <$> filteredFragmentStream)
   drawContextColorDepth (const $ mkAccumulationContext sa) $ withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) (mkFragmentShader sa <$> filteredFragmentStream)
 
-mkShader uni ca = mapM_ (mkStage uni ca) $ caStages ca
+data WaveTable
+  = WaveTable
+  { wtSin             :: Sampler1D (Format RFloat)
+  , wtSquare          :: Sampler1D (Format RFloat)
+  , wtSawTooth        :: Sampler1D (Format RFloat)
+  , wtInverseSawTooth :: Sampler1D (Format RFloat)
+  , wtTriangle        :: Sampler1D (Format RFloat)
+  , wtNoise           :: Sampler1D (Format RFloat)
+  }
+
+mkShader uni ca = do
+  let filter = SamplerFilter Linear Linear Linear Nothing
+      edge = (Repeat, undefined)
+  wt <- WaveTable <$> newSampler1D (\(_,_,(tex,_,_,_,_)) -> (tex, filter, edge))
+                  <*> newSampler1D (\(_,_,(_,tex,_,_,_)) -> (tex, filter, edge))
+                  <*> newSampler1D (\(_,_,(_,_,tex,_,_)) -> (tex, filter, edge))
+                  <*> newSampler1D (\(_,_,(_,_,_,tex,_)) -> (tex, filter, edge))
+                  <*> newSampler1D (\(_,_,(_,_,_,_,tex)) -> (tex, filter, edge))
+                  <*> newSampler1D (\(_,_,(_,_,_,_,tex)) -> (tex, filter, edge)) -- TODO: generate noise
+  mapM_ (mkStage wt uni ca) $ caStages ca
