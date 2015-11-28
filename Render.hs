@@ -57,26 +57,30 @@ convertSurface BSPLevel{..} indexBufferQ3 vertexBufferQ3 patchInfo sf@Surface{..
 type CF = ContextFormat RGBAFloat Depth
 type AttInput = (B3 Float, B3 Float, B2 Float, B2 Float, B4 Float)
 type A = PrimitiveArray Triangles AttInput
+type Tables os = (Texture1D os (Format RFloat),
+                  Texture1D os (Format RFloat),
+                  Texture1D os (Format RFloat),
+                  Texture1D os (Format RFloat),
+                  Texture1D os (Format RFloat))
 type UniInput = (B2 Int32, (B3 Float, B Float, B Float, B Float, B3 Float, B3 Float, B3 Float))
-type Tables os = (Texture1D os (Format RFloat), Texture1D os (Format RFloat), Texture1D os (Format RFloat), Texture1D os (Format RFloat), Texture1D os (Format RFloat))
 
-missingMaterial :: (MonadIO m, MonadException m) => Buffer os (Uniform UniInput) -> ContextT w os CF m (CompiledShader os CF (V2 Int,A,Tables os))
+missingMaterial :: (MonadIO m, MonadException m) => Buffer os (Uniform UniInput) -> ContextT w os CF m (CompiledShader os CF RenderInput)
 missingMaterial uniformBuffer = do 
  liftIO (putStr "-")
  compileShader $ do
   uni <- getUniform (const (uniformBuffer,0))
-  primitiveStream <- toPrimitiveStream (\(_,a,_) -> a)
+  primitiveStream <- toPrimitiveStream riStream
   let viewMat = lookAt' (viewOrigin uni) (viewTarget uni) (viewUp uni)
       V2 w h  = windowSize uni
       projMat = perspective (pi/3) (toFloat w / toFloat h) 1 10000
       make3d (V3 x y z) = projMat !*! viewMat !* V4 x y z 1
       primitiveStream2 = fmap (\(pos,_,_,_,color) -> (make3d pos, color)) primitiveStream
-  fragmentStream <- rasterize (\(V2 w h,_,_) -> (FrontAndBack, ViewPort (V2 0 0) (V2 w h), DepthRange 0 1)) primitiveStream2
+  fragmentStream <- rasterize (\ri -> (FrontAndBack, ViewPort (V2 0 0) (riScreenSize ri), DepthRange 0 1)) primitiveStream2
   let fragmentStream2 = withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) fragmentStream
   drawContextColorDepth (const (ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream2
 
-compileMaterial :: (MonadIO m, MonadException m) => Buffer os (Uniform UniInput) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF (V2 Int,A,Tables os))
-compileMaterial uniformBuffer shaderInfo = do
+compileMaterial :: (MonadIO m, MonadException m) => Tables os -> Buffer os (Uniform UniInput) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF RenderInput)
+compileMaterial tables uniformBuffer shaderInfo = do
  liftIO (putStr ".")
 {-
  stages <- forM (caStages shaderInfo) $ \sa -> compileShader $ do
@@ -84,19 +88,18 @@ compileMaterial uniformBuffer shaderInfo = do
   mkStage uni shaderInfo sa
  return $ \s -> mapM_ ($ s) stages
 -}
-{-
-input samplers:
-
-        WT_Sin              -> "SinTable"
-        WT_Triangle         -> "TriangleTable"
-        WT_Square           -> "SquareTable"
-        WT_Sawtooth         -> "SawToothTable"
-        WT_InverseSawtooth  -> "InverseSawToothTable"
-        WT_Noise            -> "Noise"
--}
  compileShader $ do
   uni <- getUniform (const (uniformBuffer,0))
-  mkShader uni shaderInfo
+  let filter = SamplerFilter Linear Linear Linear Nothing
+      edge = (Repeat, undefined)
+      (sinT,squareT,sawT,invSawT,triT) = tables
+  wt <- WaveTable <$> newSampler1D (const (sinT, filter, edge))
+                  <*> newSampler1D (const (squareT, filter, edge))
+                  <*> newSampler1D (const (sawT, filter, edge))
+                  <*> newSampler1D (const (invSawT, filter, edge))
+                  <*> newSampler1D (const (triT, filter, edge))
+                  <*> newSampler1D (const (triT, filter, edge)) -- TODO: generate noise
+  mkShader wt uni shaderInfo
 
 renderQuake :: Vec3 -> BSPLevel -> T.Trie CommonAttrs -> IO ()
 renderQuake startPos bsp@BSPLevel{..} shaderInfo =
@@ -126,16 +129,30 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo =
     missingMaterialShader <- missingMaterial uniformBuffer
 
     --  create shader for each material
-    usedShaders <- mapM (\Shader{..} -> maybe (return missingMaterialShader) (compileMaterial uniformBuffer) $ T.lookup shName shaderInfo) blShaders
-    let surfaces ctx = do
+    usedShaders <- mapM (\Shader{..} -> maybe (return missingMaterialShader) (compileMaterial tables uniformBuffer) $ T.lookup shName shaderInfo) blShaders
+    let surfaces vpSize = do
           surface0 <- zipWithM (convertSurface bsp indexBufferQ3 vertexBufferQ3) patchInfo $ V.toList blSurfaces
           -- group surfaces by material
-          let surface1 = Map.unionsWith mappend . map (uncurry Map.singleton) $ surface0
-              surface2 = Map.mapWithKey (\shader surface -> (caSort <$> T.lookup (shName $ blShaders V.! shader) shaderInfo, (usedShaders V.! shader) (ctx,surface,tables))) surface1
+          let surface1 = Map.unionsWith mappend . map (\(k,v) -> Map.singleton k [v]) $ surface0
+              --surface1 = Map.unionsWith mappend . map (uncurry Map.singleton) $ surface0
+              surface2 = Map.mapWithKey
+                (\shader surface ->
+                  ( caSort <$> T.lookup (shName $ blShaders V.! shader) shaderInfo
+--                  , (usedShaders V.! shader) (ctx,surface,tables {-TODO: pass necessary textures-})
+                  -- pass to shader every per render varying input
+                  --  geometry, diffuse texture, lightmap texture
+                  , mapM_ (\s -> (usedShaders V.! shader) (RenderInput vpSize s {-TODO: pass necessary textures-})) surface
+                  )
+                ) surface1
               -- sort surfaces by render queue
               sorted = concat $ Map.elems $ Map.unionsWith mappend [Map.singleton k [v] | (k,v) <- Map.elems surface2]
               allSurf = sequence_ sorted
           allSurf
+{-
+  per render call input information that can vary:
+    light map texture
+    diffuse texture
+-}
 
     liftIO $ putStrLn "Hello 1"
     liftIO $ GLFWb.setTime 0

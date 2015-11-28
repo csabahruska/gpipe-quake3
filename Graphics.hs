@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, PackageImports, TypeFamilies, FlexibleContexts, RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables, PackageImports, TypeFamilies, FlexibleContexts, RecordWildCards, ViewPatterns #-}
 module Graphics where
 
 import Data.ByteString.Char8 (ByteString)
@@ -191,7 +191,7 @@ mkFilterFunction sa (uv,rgba) = case saAlphaFunc sa of
             A_Lt128 -> a GPipe.<* 0.5
             A_Ge128 -> a >=* 0.5
 
-mkRasterContext ca (V2 w h,_,_) = (cull, ViewPort (V2 0 0) (V2 w h), DepthRange 0 1)
+mkRasterContext ca (riScreenSize -> V2 w h) = (cull, ViewPort (V2 0 0) (V2 w h), DepthRange 0 1)
   where
     -- TODO: offset  = if caPolygonOffset ca then Offset (-1) (-2) else NoOffset
     cull    = case caCull ca of
@@ -225,7 +225,10 @@ mkAccumulationContext StageAttrs{..} = (ContextColorOption blend (pure True), De
         B_Zero              -> Zero
 
 mkStage wt uni ca sa = do
-  primitiveStream <- toPrimitiveStream (\(_,a,_) -> a)
+  -- TODO:
+  --  create lightmap sampler
+  --  create diffuse sampler
+  primitiveStream <- toPrimitiveStream riStream
   fragmentStream <- rasterize (mkRasterContext ca) (mkVertexShader wt uni ca sa <$> primitiveStream)
   let filteredFragmentStream = filterFragments (mkFilterFunction sa) fragmentStream
   --drawContextColorDepth (const $ mkAccumulationContext sa) $ withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z + if caPolygonOffset ca then -2 else 0)) (mkFragmentShader sa <$> filteredFragmentStream)
@@ -241,13 +244,18 @@ data WaveTable
   , wtNoise           :: Sampler1D (Format RFloat)
   }
 
-mkShader uni ca = do
-  let filter = SamplerFilter Linear Linear Linear Nothing
-      edge = (Repeat, undefined)
-  wt <- WaveTable <$> newSampler1D (\(_,_,(tex,_,_,_,_)) -> (tex, filter, edge))
-                  <*> newSampler1D (\(_,_,(_,tex,_,_,_)) -> (tex, filter, edge))
-                  <*> newSampler1D (\(_,_,(_,_,tex,_,_)) -> (tex, filter, edge))
-                  <*> newSampler1D (\(_,_,(_,_,_,tex,_)) -> (tex, filter, edge))
-                  <*> newSampler1D (\(_,_,(_,_,_,_,tex)) -> (tex, filter, edge))
-                  <*> newSampler1D (\(_,_,(_,_,_,_,tex)) -> (tex, filter, edge)) -- TODO: generate noise
+{-
+type AttInput = (B3 Float, B3 Float, B2 Float, B2 Float, B4 Float)
+type A = PrimitiveArray Triangles AttInput
+type Tables os = (Texture1D os (Format RFloat), Texture1D os (Format RFloat), Texture1D os (Format RFloat), Texture1D os (Format RFloat), Texture1D os (Format RFloat))
+-}
+data RenderInput
+  = RenderInput
+  { riScreenSize  :: V2 Int
+  , riStream      :: PrimitiveArray Triangles (B3 Float, B3 Float, B2 Float, B2 Float, B4 Float) --AttInput
+  }
+
+-- TODO: create data type for state types
+mkShader wt uni ca = do
+  -- TODO: zipWithM_ stages textures
   mapM_ (mkStage wt uni ca) $ caStages ca

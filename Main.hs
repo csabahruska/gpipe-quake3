@@ -13,6 +13,7 @@ import qualified Data.Set as Set
 import qualified Data.Trie as T
 import qualified Data.Vector as V
 import Data.Vect hiding (Vector)
+import Codec.Picture
 
 import BSP
 import ShaderParser
@@ -70,9 +71,21 @@ main = do
         [x0,y0,z0] = map read $ words $ SB.unpack sp0 :: [Float]
         p0 = Vec3 x0 y0 z0
 
-    --putStrLn "material list:"
-    --putStrLn $ unlines ["  " ++ l | l <- lines $ ppShow $ T.toList shMap]
-
+        -- TODO: load textures
+{-
+    animTex <- fmap concat $ forM (Set.toList $ Set.fromList $ map (\(s,m) -> (saTexture s,m)) $
+               concatMap (\sh -> [(s,caNoMipMaps sh) | s <- caStages sh]) $ T.elems shMap) $ \(stageTex,noMip) -> do
+        let texSlotName = SB.pack $ "Tex_" ++ show (crc32 $ SB.pack $ show stageTex)
+            setTex isClamped img  = uniformFTexture2D texSlotName slotU =<< loadQ3Texture (not noMip) isClamped defaultTexture archiveTrie img
+        case stageTex of
+            ST_Map img          -> setTex False img >> return []
+            ST_ClampMap img     -> setTex True img >> return []
+            ST_AnimMap t imgs   -> do
+                txList <- mapM (loadQ3Texture (not noMip) False defaultTexture archiveTrie) imgs
+                --return [(1 / t / fromIntegral (length imgs),cycle $ zip (repeat (uniformFTexture2D texSlotName slotU)) txList)]
+                return [(1/t,cycle $ zip (repeat (uniformFTexture2D texSlotName slotU)) txList)]
+            _ -> return []
+-}
     putStrLn $ "loading: " ++ show bspName
     renderQuake p0 bsp shMap
 
@@ -102,3 +115,20 @@ parseEntities n s = eval n $ parse entities s
         Done rem r  -> error $ show (n,"Input is not consumed", rem, r)
         Fail _ c _  -> error $ show (n,"Fail",c)
         Partial f'  -> eval n (f' "")
+
+loadQ3Texture :: T.Trie Entry -> SB.ByteString -> IO (Maybe DynamicImage)
+loadQ3Texture ar name = do
+    let name' = SB.unpack name
+        n1 = SB.pack $ replaceExtension name' "tga"
+        n2 = SB.pack $ replaceExtension name' "jpg"
+        b0 = T.member name ar
+        b1 = T.member n1 ar
+        b2 = T.member n2 ar
+        fname   = if b0 then name else if b1 then n1 else n2
+    case T.lookup fname ar of
+        Nothing -> return Nothing
+        Just d  -> do
+            putStrLn $ "  load: " ++ SB.unpack fname
+            case decodeImage $ decompress d of
+                Left msg    -> putStrLn ("    error: " ++ msg) >> return Nothing
+                Right img   -> return $ Just img
