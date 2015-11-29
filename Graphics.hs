@@ -96,7 +96,7 @@ mkTCMod wt uni pos uv m = case m of
                            mB   = V2 ms c
                            m    = V2 mA mB
                            off  = V2 (0.5 - 0.5 * c + 0.5 * s) (0.5 - 0.5 * s - 0.5 * c)
-                       in m !* uv + off
+                       in uv *! m + off
     TM_Transform m00 m01 m10 m11 t0 t1  -> let V2 u v   = uv
                                                u'       = u * realToFrac m00 + v * realToFrac m10 + realToFrac t0
                                                v'       = u * realToFrac m01 + v * realToFrac m11 + realToFrac t1
