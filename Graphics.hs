@@ -217,7 +217,7 @@ mkStage checkerTex texInfo wt uni ca sa = do
         ST_Lightmap     -> (ClampToEdge,  checkerTex)
         ST_Map n        -> (Repeat,       lookupTex n)
         ST_ClampMap n   -> (ClampToEdge,  lookupTex n)
-        ST_AnimMap _ l  -> (Repeat,       checkerTex) -- TODO
+        ST_AnimMap _ (n:l)  -> (Repeat,   lookupTex n) -- TODO
       lookupTex n = maybe checkerTex id $ T.lookup n texInfo
   diffuseSmp  <- newSampler2D (\s -> (diffuse,      SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
   lightmapSmp <- newSampler2D (\s -> (riLightmap s, SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
