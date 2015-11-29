@@ -3,6 +3,7 @@
 import Text.Show.Pretty
 import Data.Attoparsec.ByteString.Char8
 
+import Data.Maybe
 import Data.Char
 import Data.List (isPrefixOf,partition)
 import System.Directory
@@ -71,7 +72,15 @@ main = do
         [x0,y0,z0] = map read $ words $ SB.unpack sp0 :: [Float]
         p0 = Vec3 x0 y0 z0
 
-        -- TODO: load textures
+        -- load textures
+        textureSet  = foldMap (mconcat . map stageTex . caStages) shMap
+        stageTex sa = case saTexture sa of
+          ST_Map n        -> Set.singleton n
+          ST_ClampMap n   -> Set.singleton n
+          ST_AnimMap _ l  -> mconcat $ map Set.singleton l
+          _ -> mempty
+        archiveTrie = T.fromList [(SB.pack $ eFilePath a,a) | a <- ar]
+        textureMap  = T.fromList [(n, i) | n <- Set.toList textureSet, i <- maybeToList $ loadQ3Texture archiveTrie n]
 {-
     animTex <- fmap concat $ forM (Set.toList $ Set.fromList $ map (\(s,m) -> (saTexture s,m)) $
                concatMap (\sh -> [(s,caNoMipMaps sh) | s <- caStages sh]) $ T.elems shMap) $ \(stageTex,noMip) -> do
@@ -87,7 +96,7 @@ main = do
             _ -> return []
 -}
     putStrLn $ "loading: " ++ show bspName
-    renderQuake p0 bsp shMap
+    renderQuake p0 bsp shMap textureMap
 
 -- pk3 handling
 
@@ -116,19 +125,17 @@ parseEntities n s = eval n $ parse entities s
         Fail _ c _  -> error $ show (n,"Fail",c)
         Partial f'  -> eval n (f' "")
 
-loadQ3Texture :: T.Trie Entry -> SB.ByteString -> IO (Maybe DynamicImage)
-loadQ3Texture ar name = do
-    let name' = SB.unpack name
-        n1 = SB.pack $ replaceExtension name' "tga"
-        n2 = SB.pack $ replaceExtension name' "jpg"
-        b0 = T.member name ar
-        b1 = T.member n1 ar
-        b2 = T.member n2 ar
-        fname   = if b0 then name else if b1 then n1 else n2
-    case T.lookup fname ar of
-        Nothing -> return Nothing
-        Just d  -> do
-            putStrLn $ "  load: " ++ SB.unpack fname
-            case decodeImage $ decompress d of
-                Left msg    -> putStrLn ("    error: " ++ msg) >> return Nothing
-                Right img   -> return $ Just img
+loadQ3Texture :: T.Trie Entry -> SB.ByteString -> Maybe DynamicImage
+loadQ3Texture ar name = case T.lookup fname ar of
+  Nothing -> Nothing
+  Just d  -> case decodeImage $ decompress d of
+    Left msg  -> Nothing
+    Right img -> Just img
+ where
+  name' = SB.unpack name
+  n1 = SB.pack $ replaceExtension name' "tga"
+  n2 = SB.pack $ replaceExtension name' "jpg"
+  b0 = T.member name ar
+  b1 = T.member n1 ar
+  b2 = T.member n2 ar
+  fname   = if b0 then name else if b1 then n1 else n2

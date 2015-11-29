@@ -4,7 +4,7 @@ module Graphics where
 import Data.ByteString.Char8 (ByteString)
 import qualified Data.ByteString.Char8 as SB
 import Data.List
---import Data.Digest.CRC32
+import qualified Data.Vector as V
 import Data.Maybe
 import Data.Vect
 import "lens" Control.Lens
@@ -13,7 +13,7 @@ import Material hiding (Blending)
 
 import Graphics.GPipe as GPipe
 
-mkColor wt uni ca sa x@(V4 rV gV bV aV) = x--V4 cr cg cb alpha
+mkColor wt uni ca sa x@(V4 rV gV bV aV) = V4 cr cg cb alpha
   where
     green = V3 0 1 0
     V3 cr cg cb = case saRGBGen sa of
@@ -146,50 +146,34 @@ uniform tuple:
       (V3 Float, Float,       Float,         Float, V3 Float,   V3 Float,   V3 Float)
 -}
 
-mkVertexShader wt uni ca sa (p@(V3 x y z),n,d,l,c) = (screenPos, (uv, color))
+mkVertexShader wt uni ca sa (p,n,d,l,c) = (screenPos, (uv, color))
   where
     viewMat     = lookAt' (viewOrigin uni) (viewTarget uni) (viewUp uni)
     V2 w h      = windowSize uni
     projMat     = perspective (pi/3) (toFloat w / toFloat h) 1 10000
     screenPos   = projMat !*! viewMat !* V4 x y z 1
-    pos         = foldl' (mkDeform wt uni d n) p $ caDeformVertexes ca
-    uv          = mkTexCoord wt uni pos n sa d l
-    color       = mkColor wt uni ca sa c
+    pos@(V3 x y z) = foldl' (mkDeform wt uni d n) p $ caDeformVertexes ca
+    uv    = mkTexCoord wt uni pos n sa d l
+    color = mkColor wt uni ca sa c
 
-mkFragmentShader sa (uv,rgba) = color
+mkFragmentShader dSmp lSmp sa (uv,rgba) = case saTexture sa of
+    ST_WhiteImage   -> rgba
+    ST_Lightmap     -> rgba * texColor3 lSmp
+    ST_Map {}       -> rgba * texColor4 dSmp
+    ST_ClampMap {}  -> rgba * texColor4 dSmp
+    ST_AnimMap {}   -> rgba * texColor4 dSmp
   where
-    stageTex    = saTexture sa
-    stageTexN   = ""--TODO SB.pack $ "Tex_" ++ show (crc32 $ SB.pack $ show stageTex)
-    color       = case stageTex of
-        ST_WhiteImage   -> rgba
-        ST_Lightmap     -> rgba * texColor ClampToEdge "LightMap"
-        ST_Map {}       -> rgba * texColor Repeat  stageTexN
-        ST_ClampMap {}  -> rgba * texColor ClampToEdge stageTexN
-        ST_AnimMap {}   -> rgba * texColor Repeat  stageTexN
-    texColor em name = V4 1 1 1 1 --TODO: texture' sampler uv
-      where
-        --sampler     = Sampler LinearFilter em $ TextureSlot name (Texture2D (Float RGBA) n1)
+    texColor4 smp = sample2D smp (SampleLod 0) Nothing Nothing uv
+    texColor3 smp = v3v4 $ sample2D smp (SampleLod 0) Nothing Nothing uv
+    v3v4 (V3 r g b) = V4 r g b 1
 
-mkFilterFunction sa (uv,rgba) = case saAlphaFunc sa of
+mkFilterFunction dSmp lSmp sa uvrgba = case saAlphaFunc sa of
     Nothing -> true
-    Just f  ->
-        let
-            V4 _ _ _ a  = color
-            stageTex    = saTexture sa
-            stageTexN   = ""--SB.pack $ "Tex_" ++ show (crc32 $ SB.pack $ show stageTex)
-            color       = case stageTex of
-                ST_WhiteImage   -> rgba
-                ST_Lightmap     -> rgba * texColor ClampToEdge "LightMap"
-                ST_Map {}       -> rgba * texColor Repeat  stageTexN
-                ST_ClampMap {}  -> rgba * texColor ClampToEdge stageTexN
-                ST_AnimMap {}   -> rgba * texColor Repeat  stageTexN
-            texColor em name = V4 1 0 0 1-- TODO: texture' sampler uv
-              where
-                --sampler     = Sampler LinearFilter em $ TextureSlot name (Texture2D (Float RGBA) n1)
-        in case f of
-            A_Gt0   -> a >* 0
-            A_Lt128 -> a GPipe.<* 0.5
-            A_Ge128 -> a >=* 0.5
+    Just f  -> let V4 _ _ _ a = mkFragmentShader dSmp lSmp sa uvrgba
+               in case f of
+                 A_Gt0   -> a >* 0
+                 A_Lt128 -> a GPipe.<* 0.5
+                 A_Ge128 -> a >=* 0.5
 
 mkRasterContext ca (riScreenSize -> V2 w h) = (cull, ViewPort (V2 0 0) (V2 w h), DepthRange 0 1)
   where
@@ -224,15 +208,24 @@ mkAccumulationContext StageAttrs{..} = (ContextColorOption blend (pure True), De
         B_SrcColor          -> SrcColor
         B_Zero              -> Zero
 
-mkStage wt uni ca sa = do
-  -- TODO:
-  --  create lightmap sampler
-  --  create diffuse sampler
+mkStage wt uni ca (idx,sa) = do
+  let edge = case saTexture sa of
+        ST_WhiteImage   -> Repeat
+        ST_Lightmap     -> ClampToEdge
+        ST_Map {}       -> Repeat
+        ST_ClampMap {}  -> ClampToEdge
+        ST_AnimMap {}   -> Repeat
+  diffuseSmp  <- newSampler2D (\s -> (riDiffuse s {-V.! idx-}, SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
+  lightmapSmp <- newSampler2D (\s -> (riLightmap s,        SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
+
   primitiveStream <- toPrimitiveStream riStream
   fragmentStream <- rasterize (mkRasterContext ca) (mkVertexShader wt uni ca sa <$> primitiveStream)
-  let filteredFragmentStream = filterFragments (mkFilterFunction sa) fragmentStream
+  let filteredFragmentStream = filterFragments (mkFilterFunction diffuseSmp lightmapSmp sa) fragmentStream
   --drawContextColorDepth (const $ mkAccumulationContext sa) $ withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z + if caPolygonOffset ca then -2 else 0)) (mkFragmentShader sa <$> filteredFragmentStream)
-  drawContextColorDepth (const $ mkAccumulationContext sa) $ withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) (mkFragmentShader sa <$> filteredFragmentStream)
+  drawContextColorDepth (const $ mkAccumulationContext sa) $
+    withRasterizedInfo
+      (\a r -> (a, rasterizedFragCoord r ^. _z))
+      (mkFragmentShader diffuseSmp lightmapSmp sa <$> filteredFragmentStream)
 
 data WaveTable
   = WaveTable
@@ -249,13 +242,12 @@ type AttInput = (B3 Float, B3 Float, B2 Float, B2 Float, B4 Float)
 type A = PrimitiveArray Triangles AttInput
 type Tables os = (Texture1D os (Format RFloat), Texture1D os (Format RFloat), Texture1D os (Format RFloat), Texture1D os (Format RFloat), Texture1D os (Format RFloat))
 -}
-data RenderInput
+data RenderInput os
   = RenderInput
   { riScreenSize  :: V2 Int
   , riStream      :: PrimitiveArray Triangles (B3 Float, B3 Float, B2 Float, B2 Float, B4 Float) --AttInput
+  , riDiffuse     :: {-V.Vector-} (Texture2D os (Format RGBAFloat))
+  , riLightmap    :: Texture2D os (Format RGBFloat)
   }
 
--- TODO: create data type for state types
-mkShader wt uni ca = do
-  -- TODO: zipWithM_ stages textures
-  mapM_ (mkStage wt uni ca) $ caStages ca
+mkShader wt uni ca = mapM_ (mkStage wt uni ca) $ zip [(0::Int)..] $ caStages ca
