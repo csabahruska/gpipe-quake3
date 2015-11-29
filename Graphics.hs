@@ -5,15 +5,17 @@ import Data.ByteString.Char8 (ByteString)
 import qualified Data.ByteString.Char8 as SB
 import Data.List
 import qualified Data.Vector as V
+import qualified Data.Trie as T
 import Data.Maybe
 import Data.Vect
 import "lens" Control.Lens
+import Control.Monad.IO.Class
 
 import Material hiding (Blending)
 
 import Graphics.GPipe as GPipe
 
-mkColor wt uni ca sa x@(V4 rV gV bV aV) = V4 cr cg cb alpha
+mkColor wt uni ca sa (V4 rV gV bV aV) = V4 cr cg cb alpha
   where
     green = V3 0 1 0
     V3 cr cg cb = case saRGBGen sa of
@@ -156,20 +158,21 @@ mkVertexShader wt uni ca sa (p,n,d,l,c) = (screenPos, (uv, color))
     uv    = mkTexCoord wt uni pos n sa d l
     color = mkColor wt uni ca sa c
 
-mkFragmentShader dSmp lSmp sa (uv,rgba) = case saTexture sa of
+mkFragmentShader dSmp lSmp ca sa (uv,rgba) = case saTexture sa of
     ST_WhiteImage   -> rgba
     ST_Lightmap     -> rgba * texColor3 lSmp
     ST_Map {}       -> rgba * texColor4 dSmp
     ST_ClampMap {}  -> rgba * texColor4 dSmp
     ST_AnimMap {}   -> rgba * texColor4 dSmp
   where
-    texColor4 smp = sample2D smp (SampleLod 0) Nothing Nothing uv
-    texColor3 smp = v3v4 $ sample2D smp (SampleLod 0) Nothing Nothing uv
+    lod = if caNoMipMaps ca then SampleLod 0 else SampleAuto
+    texColor4 smp = sample2D smp lod Nothing Nothing uv
+    texColor3 smp = v3v4 $ sample2D smp lod Nothing Nothing uv
     v3v4 (V3 r g b) = V4 r g b 1
 
-mkFilterFunction dSmp lSmp sa uvrgba = case saAlphaFunc sa of
+mkFilterFunction dSmp lSmp ca sa uvrgba = case saAlphaFunc sa of
     Nothing -> true
-    Just f  -> let V4 _ _ _ a = mkFragmentShader dSmp lSmp sa uvrgba
+    Just f  -> let V4 _ _ _ a = mkFragmentShader dSmp lSmp ca sa uvrgba
                in case f of
                  A_Gt0   -> a >* 0
                  A_Lt128 -> a GPipe.<* 0.5
@@ -208,24 +211,25 @@ mkAccumulationContext StageAttrs{..} = (ContextColorOption blend (pure True), De
         B_SrcColor          -> SrcColor
         B_Zero              -> Zero
 
-mkStage wt uni ca (idx,sa) = do
-  let edge = case saTexture sa of
-        ST_WhiteImage   -> Repeat
-        ST_Lightmap     -> ClampToEdge
-        ST_Map {}       -> Repeat
-        ST_ClampMap {}  -> ClampToEdge
-        ST_AnimMap {}   -> Repeat
-  diffuseSmp  <- newSampler2D (\s -> (riDiffuse s {-V.! idx-}, SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
-  lightmapSmp <- newSampler2D (\s -> (riLightmap s,        SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
+mkStage checkerTex texInfo wt uni ca sa = do
+  let (edge,diffuse) = case saTexture sa of
+        ST_WhiteImage   -> (Repeat,       checkerTex)
+        ST_Lightmap     -> (ClampToEdge,  checkerTex)
+        ST_Map n        -> (Repeat,       lookupTex n)
+        ST_ClampMap n   -> (ClampToEdge,  lookupTex n)
+        ST_AnimMap _ l  -> (Repeat,       checkerTex) -- TODO
+      lookupTex n = maybe checkerTex id $ T.lookup n texInfo
+  diffuseSmp  <- newSampler2D (\s -> (diffuse,      SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
+  lightmapSmp <- newSampler2D (\s -> (riLightmap s, SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
 
   primitiveStream <- toPrimitiveStream riStream
   fragmentStream <- rasterize (mkRasterContext ca) (mkVertexShader wt uni ca sa <$> primitiveStream)
-  let filteredFragmentStream = filterFragments (mkFilterFunction diffuseSmp lightmapSmp sa) fragmentStream
+  let filteredFragmentStream = filterFragments (mkFilterFunction diffuseSmp lightmapSmp ca sa) fragmentStream
   --drawContextColorDepth (const $ mkAccumulationContext sa) $ withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z + if caPolygonOffset ca then -2 else 0)) (mkFragmentShader sa <$> filteredFragmentStream)
   drawContextColorDepth (const $ mkAccumulationContext sa) $
     withRasterizedInfo
       (\a r -> (a, rasterizedFragCoord r ^. _z))
-      (mkFragmentShader diffuseSmp lightmapSmp sa <$> filteredFragmentStream)
+      (mkFragmentShader diffuseSmp lightmapSmp ca sa <$> filteredFragmentStream)
 
 data WaveTable
   = WaveTable
@@ -246,8 +250,7 @@ data RenderInput os
   = RenderInput
   { riScreenSize  :: V2 Int
   , riStream      :: PrimitiveArray Triangles (B3 Float, B3 Float, B2 Float, B2 Float, B4 Float) --AttInput
-  , riDiffuse     :: {-V.Vector-} (Texture2D os (Format RGBAFloat))
   , riLightmap    :: Texture2D os (Format RGBFloat)
   }
 
-mkShader wt uni ca = mapM_ (mkStage wt uni ca) $ zip [(0::Int)..] $ caStages ca
+mkShader checkerTex texInfo wt uni ca = mapM_ (mkStage checkerTex texInfo wt uni ca) $ caStages ca

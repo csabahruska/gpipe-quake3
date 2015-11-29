@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, PackageImports, TypeFamilies, FlexibleContexts, RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables, PackageImports, TypeFamilies, FlexibleContexts, RecordWildCards, LambdaCase #-}
 module Render where
 
 import Control.Monad.Exception (MonadException)
@@ -8,7 +8,7 @@ import qualified "GPipe-GLFW" Graphics.GPipe.Context.GLFW as GLFW
 import qualified "GLFW-b" Graphics.UI.GLFW as GLFWb
 import "lens" Control.Lens
 import Control.Monad (unless,zipWithM,forM)
-import Data.Word (Word32)
+import Data.Word (Word32,Word8)
 import Control.Applicative (pure)
 import Data.Monoid (mappend)
 
@@ -16,8 +16,10 @@ import qualified Data.ByteString as SB
 import qualified Data.Map as Map
 import qualified Data.Trie as T
 import qualified Data.Vector as V
+import qualified Data.Vector.Storable as SV
 import Data.Vect hiding (Vector)
 import Codec.Picture
+import Codec.Picture.Types
 import Data.Bits
 import Data.Int
 import BSP
@@ -82,8 +84,8 @@ missingMaterial uniformBuffer = do
   let fragmentStream2 = withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) fragmentStream
   drawContextColorDepth (const (ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream2
 
-compileMaterial :: (MonadIO m, MonadException m) => Tables os -> Buffer os (Uniform UniInput) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF (RenderInput os))
-compileMaterial tables uniformBuffer shaderInfo = do
+compileMaterial :: (MonadIO m, MonadException m) => Texture2D os (Format RGBAFloat) -> T.Trie (Texture2D os (Format RGBAFloat)) -> Tables os -> Buffer os (Uniform UniInput) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF (RenderInput os))
+compileMaterial checkerTex texInfo tables uniformBuffer shaderInfo = do
  liftIO (putStr ".")
  compileShader $ do
   uni <- getUniform (const (uniformBuffer,0))
@@ -96,7 +98,7 @@ compileMaterial tables uniformBuffer shaderInfo = do
                   <*> newSampler1D (const (invSawT, filter, edge))
                   <*> newSampler1D (const (triT, filter, edge))
                   <*> newSampler1D (const (triT, filter, edge)) -- TODO: generate noise
-  mkShader wt uni shaderInfo
+  mkShader checkerTex texInfo wt uni shaderInfo
 
 renderQuake :: Vec3 -> BSPLevel -> T.Trie CommonAttrs -> T.Trie DynamicImage -> IO ()
 renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
@@ -132,18 +134,38 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
     whiteTex <- newTexture2D RGB8 (V2 1 1) 1
     writeTexture2D whiteTex 0 (V2 0 0) (V2 1 1) [V3 (1 :: Float) 1 1]
 
-    -- TODO
     -- load diffuse textures
-    diffuse <- newTexture2D RGBA8 (V2 8 8) 1
-    let whiteBlack = cycle [V4 0 0 0 1, V4 1 1 1 1] :: [V4 Float]  
-        blackWhite = tail whiteBlack  
-    writeTexture2D diffuse 0 0 (V2 8 8) (cycle (take 8 whiteBlack ++ take 8 blackWhite))   
+    checkerTex <- newTexture2D RGBA8 (V2 8 8) 1
+    let whiteBlack = cycle [V4 0 0 0 1, V4 1 1 0 1] :: [V4 Float]
+        blackWhite = tail whiteBlack
+    writeTexture2D checkerTex 0 0 (V2 8 8) (cycle (take 8 whiteBlack ++ take 8 blackWhite))
+
+    let mkTex w h l = do
+          tex <- newTexture2D SRGB8A8 (V2 w h) (floor ((max (log (fromIntegral w :: Float)) (log (fromIntegral h :: Float))) / log 2) :: Int)
+          writeTexture2D tex 0 0 (V2 w h) l
+          generateTexture2DMipmap tex
+          return tex
+    texInfo <- sequence $ flip fmap imageInfo $ \case
+      ImageRGB8 i@(Image w h _)   -> mkTex w h $ pixelFoldMap (\(PixelRGB8 r g b) -> [V4 r g b maxBound]) i
+      ImageRGBA8 i@(Image w h _)  -> mkTex w h $ pixelFoldMap (\(PixelRGBA8 r g b a) -> [V4 r g b a]) i
+      ImageYCbCr8 i@(Image w h _) -> mkTex w h $ pixelFoldMap (\p -> let PixelRGB8 r g b = convertPixel p in [V4 r g b maxBound]) i
+      ImageCMYK16 _ -> liftIO (putStrLn "ImageCMYK16") >> return checkerTex
+      ImageCMYK8 _ -> liftIO (putStrLn "ImageCMYK8") >> return checkerTex
+      ImageRGBA16 _ -> liftIO (putStrLn "ImageRGBA16") >> return checkerTex
+      ImageRGBF _ -> liftIO (putStrLn "ImageRGBF") >> return checkerTex
+      ImageRGB16 _ -> liftIO (putStrLn "ImageRGB16") >> return checkerTex
+      ImageYA16 _ -> liftIO (putStrLn "ImageYA16") >> return checkerTex
+      ImageYA8 _ -> liftIO (putStrLn "ImageYA8") >> return checkerTex
+      ImageYF _ -> liftIO (putStrLn "ImageYF") >> return checkerTex
+      ImageY16 _ -> liftIO (putStrLn "ImageY16") >> return checkerTex
+      ImageY8 _ -> liftIO (putStrLn "ImageY8") >> return checkerTex
+      _ -> liftIO (putStrLn ";") >> return checkerTex
 
     -- shader for unknown materials
     missingMaterialShader <- missingMaterial uniformBuffer
 
     --  create shader for each material
-    usedShaders <- mapM (\Shader{..} -> maybe (return missingMaterialShader) (compileMaterial tables uniformBuffer) $ T.lookup shName shaderInfo) blShaders
+    usedShaders <- mapM (\Shader{..} -> maybe (return missingMaterialShader) (compileMaterial checkerTex texInfo tables uniformBuffer) $ T.lookup shName shaderInfo) blShaders
     let surfaces vpSize = do
           surface0 <- zipWithM (convertSurface bsp indexBufferQ3 vertexBufferQ3 whiteTex lightmaps) patchInfo $ V.toList blSurfaces
           -- group surfaces by material
@@ -152,21 +174,15 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
               surface2 = Map.mapWithKey
                 (\shader surface ->
                   ( caSort <$> T.lookup (shName $ blShaders V.! shader) shaderInfo
---                  , (usedShaders V.! shader) (ctx,surface,tables {-TODO: pass necessary textures-})
                   -- pass to shader every per render varying input
                   --  geometry, diffuse texture, lightmap texture
-                  , mapM_ (\(lightmap,stream) -> (usedShaders V.! shader) (RenderInput vpSize stream diffuse{-TODO-} lightmap)) surface
+                  , mapM_ (\(lightmap,stream) -> (usedShaders V.! shader) (RenderInput vpSize stream lightmap)) surface
                   )
                 ) surface1
               -- sort surfaces by render queue
               sorted = concat $ Map.elems $ Map.unionsWith mappend [Map.singleton k [v] | (k,v) <- Map.elems surface2]
               allSurf = sequence_ sorted
           allSurf
-{-
-  per render call input information that can vary:
-    light map texture
-    diffuse texture
--}
 
     liftIO $ putStrLn "Hello 1"
     liftIO $ GLFWb.setTime 0
