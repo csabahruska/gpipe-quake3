@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, PackageImports #-}
 module BSP where
 
 import Control.Applicative
@@ -8,10 +8,10 @@ import Data.Char
 import Data.Int
 import Data.Word
 
+import "linear" Linear
 import Data.Binary as B
 import Data.Binary.Get as B
 import Data.Binary.IEEE754
-import Data.Vect hiding (Vector)
 import Data.Vector (Vector)
 import qualified Data.ByteString as SB8
 import qualified Data.ByteString.Char8 as SB
@@ -35,6 +35,10 @@ All data in a BSP file is organized into records composed of these four data typ
 -}
 
 -- http://www.mralligator.com/q3/
+
+type Vec4 = V4 Float
+type Vec3 = V3 Float
+type Vec2 = V2 Float
 
 lumpEntities     =  0 :: Int -- ^ Game-related object descriptions
 lumpShaders      =  1 :: Int -- ^ Stores texture information
@@ -197,12 +201,12 @@ getUByte3   = B.get :: Get (Word8,Word8,Word8)
 
 getFloat    = getFloat32le
 
-getVec2     = Vec2 <$> getFloat <*> getFloat
-getVec3     = Vec3 <$> getFloat <*> getFloat <*> getFloat
-getVec2i    = (\x y -> Vec2 (fromIntegral x) (fromIntegral y)) <$> getInt <*> getInt
-getVec3i    = (\x y z -> Vec3 (fromIntegral x) (fromIntegral y) (fromIntegral z)) <$> getInt <*> getInt <*> getInt
+getVec2     = V2 <$> getFloat <*> getFloat
+getVec3     = V3 <$> getFloat <*> getFloat <*> getFloat
+getVec2i    = (\x y -> V2 (fromIntegral x) (fromIntegral y)) <$> getInt <*> getInt
+getVec3i    = (\x y z -> V3 (fromIntegral x) (fromIntegral y) (fromIntegral z)) <$> getInt <*> getInt <*> getInt
 
-getVec4RGBA = (\r g b a -> Vec4 (f r) (f g) (f b) (f a)) <$> getUByte <*> getUByte <*> getUByte <*> getUByte
+getVec4RGBA = (\r g b a -> V4 (f r) (f g) (f b) (f a)) <$> getUByte <*> getUByte <*> getUByte <*> getUByte
   where
     f v = fromIntegral v / 255
 

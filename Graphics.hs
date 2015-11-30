@@ -7,7 +7,6 @@ import Data.List
 import qualified Data.Vector as V
 import qualified Data.Trie as T
 import Data.Maybe
-import Data.Vect
 import "lens" Control.Lens
 import Control.Monad.IO.Class
 
@@ -69,7 +68,7 @@ mkWave' wt uni off (Wave wFunc base amplitude phase freq) = realToFrac base + a 
 mkWave wt uni w = mkWave' wt uni 0 w :: VFloat
 
 mkDeform wt uni uv normal pos d = case d of
-    D_Move (Vec3 x y z) w   -> pos + V3 (realToFrac x) (realToFrac y) (realToFrac z) ^* mkWave wt uni w
+    D_Move v w -> pos + (realToFrac <$> v) ^* mkWave wt uni w
     D_Wave spread w@(Wave _ _ _ _ f)
         | f < 0.000001  -> pos + normal ^* mkWave wt uni w
         | otherwise     ->
@@ -118,9 +117,7 @@ mkTexCoord wt uni pos normal sa uvD uvL = foldl' (mkTCMod wt uni pos) uv $ saTCM
                                 d           = normal `dot` viewer
                                 V3 _ y z    = normal ^* (2 * d) - viewer
                             in V2 (0.5 + y * 0.5) (0.5 - z * 0.5)
-        TG_Vector (Vec3 sx sy sz) (Vec3 tx ty tz)   -> let s    = V3 (realToFrac sx) (realToFrac sy) (realToFrac sz)
-                                                           t    = V3 (realToFrac tx) (realToFrac ty) (realToFrac tz)
-                                                       in V2 (pos `dot` s) (pos `dot` t)
+        TG_Vector s t   -> V2 (pos `dot` (realToFrac <$> s)) (pos `dot` (realToFrac <$> t))
 
 lookAt' eye center up =
   V4 (V4 (xa^._x)  (xa^._y)  (xa^._z)  xd)

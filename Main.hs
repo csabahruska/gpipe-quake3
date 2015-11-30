@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings, PackageImports, TupleSections #-}
 
+import "linear" Linear
 import Text.Show.Pretty
 import Data.Attoparsec.ByteString.Char8
 
@@ -13,7 +14,6 @@ import qualified Data.ByteString.Char8 as SB
 import qualified Data.Set as Set
 import qualified Data.Trie as T
 import qualified Data.Vector as V
-import Data.Vect hiding (Vector)
 import Codec.Picture
 
 import BSP
@@ -70,7 +70,7 @@ main = do
             _                               -> False
         Just sp0 = T.lookup "origin" $ head $ filter spawn ents
         [x0,y0,z0] = map read $ words $ SB.unpack sp0 :: [Float]
-        p0 = Vec3 x0 y0 z0
+        p0 = V3 x0 y0 z0
 
         -- load textures
         textureSet  = foldMap (mconcat . map stageTex . caStages) shMap

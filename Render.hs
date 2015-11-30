@@ -17,7 +17,6 @@ import qualified Data.Map as Map
 import qualified Data.Trie as T
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable as SV
-import Data.Vect hiding (Vector)
 import Codec.Picture
 import Codec.Picture.Types
 import Data.Bits
@@ -100,7 +99,7 @@ compileMaterial checkerTex texInfo tables uniformBuffer shaderInfo = do
                   <*> newSampler1D (const (triT, filter, edge)) -- TODO: generate noise
   mkShader checkerTex texInfo wt uni shaderInfo
 
-renderQuake :: Vec3 -> BSPLevel -> T.Trie CommonAttrs -> T.Trie DynamicImage -> IO ()
+renderQuake :: V3 Float -> BSPLevel -> T.Trie CommonAttrs -> T.Trie DynamicImage -> IO ()
 renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
   runContextT GLFW.newContext (ContextFormatColorDepth RGBA32F Depth32) $ do
     -- pre tesselate patches and append to static draw verices and indices
@@ -109,12 +108,9 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
         patchSize   = [(V.length v, V.length i) | (v,i) <- patches]
         patchOffset = scanl' (\(offsetV,offsetI) (v,i) -> (offsetV + v, offsetI + i)) (V.length blDrawVertices, V.length blDrawIndices) patchSize
         patchInfo   = zip patchOffset patchSize
-        v2 (Vec2 x y) = V2 x y
-        v3 (Vec3 x y z) = V3 x y z
-        v4 (Vec4 x y z w) = V4 x y z w
 
     vertexBufferQ3 :: Buffer os AttInput <- newBuffer (V.length verticesQ3)
-    writeBuffer vertexBufferQ3 0 [(v3 dvPosition, v3 dvNormal, v2 dvDiffuseUV, v2 dvLightmaptUV, v4 dvColor) | DrawVertex{..} <- V.toList verticesQ3]
+    writeBuffer vertexBufferQ3 0 [(dvPosition, dvNormal, dvDiffuseUV, dvLightmaptUV, dvColor) | DrawVertex{..} <- V.toList verticesQ3]
 
     indexBufferQ3 :: Buffer os (B Word32) <- newBuffer $ V.length indicesQ3
     writeBuffer indexBufferQ3 0 $ map fromIntegral $ V.toList indicesQ3 
@@ -202,13 +198,12 @@ renderLoop uniformBuffer s t renderings = do
 
   size <- getContextBuffersSize
   let s'@(eye,center,up,_) = calcCam (t'-t) (realToFrac mx, realToFrac my) keys s
-      toV3 (Vec3 x y z) = V3 x y z
 {-
   uniform tuple:
       entityRGB, entityAlpha, identityLight, time,  viewOrigin, viewTarget, viewUp
       (V3 Float, Float,       Float,         Float, V3 Float,   V3 Float,   V3 Float)
 -}
-  writeBuffer uniformBuffer 0 [(fromIntegral <$> size,(V3 1 1 1, 1, 1, realToFrac t', toV3 eye, toV3 center, toV3 up))]
+  writeBuffer uniformBuffer 0 [(fromIntegral <$> size,(V3 1 1 1, 1, 1, realToFrac t', eye, center, up))]
 
   render $ do
     clearContextColor 0.5

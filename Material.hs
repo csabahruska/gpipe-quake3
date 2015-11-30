@@ -1,7 +1,11 @@
+{-# LANGUAGE PackageImports #-}
 module Material where
 
-import Data.Vect
+import "linear" Linear
 import qualified Data.ByteString.Char8 as SB
+
+type Vec4 = V4 Float
+type Vec3 = V3 Float
 
 identityLight :: Float
 identityLight = 1

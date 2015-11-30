@@ -1,10 +1,10 @@
+{-# LANGUAGE PackageImports #-}
 -- http://graphics.cs.brown.edu/games/quake/quake3.html#RenderPatch
 
 module Q3Patch where
 
 import Control.Monad
-import Data.Vect.Float hiding (Vector)
-import Data.Vect.Float.Instances
+import "linear" Linear
 import Data.Vector (Vector,(!))
 import qualified Data.Vector as V
 import qualified Data.Vector.Mutable as MV
@@ -15,7 +15,7 @@ tessellate :: Vector DrawVertex -> Int -> (Vector DrawVertex,Vector Int)
 tessellate controls level = (v,stripsI)
   where
     plus (DrawVertex p1 d1 l1 n1 c1) (DrawVertex p2 d2 l2 n2 c2) = DrawVertex (p1 + p2) (d1 + d2) (l1 + l2) (n1 + n2) (c1 + c2)
-    mult (DrawVertex p d l n c) f = DrawVertex (p &* f) (d &* f) (l &* f) (n &* f) (c &* f)
+    mult (DrawVertex p d l n c) f = DrawVertex (p ^* f) (d ^* f) (l ^* f) (n ^* f) (c ^* f)
     mix a c0 c1 c2 = let b = 1 - a in (c0 `mult` (b * b)) `plus` (c1 `mult` (2 * b * a)) `plus` (c2 `mult` (a * a))
     l1 = level + 1
     v = V.create $ do

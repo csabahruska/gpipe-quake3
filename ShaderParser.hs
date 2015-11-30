@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, PackageImports #-}
 
 module ShaderParser where
 
@@ -7,9 +7,9 @@ import Data.Attoparsec.ByteString.Char8
 import Data.ByteString.Char8 (ByteString)
 import Data.Char (toLower)
 import Data.List (foldl')
-import Data.Vect
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Trie as T
+import "linear" Linear
 
 import Material
 
@@ -224,7 +224,7 @@ deformVertexes = (\v ca -> ca {caDeformVertexes = v:caDeformVertexes ca}) <$ kw 
     (\s w -> D_Wave (if s == 0 then 100 else 1/s) w) <$ kw "wave" <*> float <*> wave
     )
   where
-    v3 = Vec3 <$> float <*> float <*> float
+    v3 = V3 <$> float <*> float <*> float
 
 fogParms = pass <$> kw "fogparms" <* kw "(" <* float <* float <* float <* kw ")" <* float
 nopicmip = pass <$> kw "nopicmip"
@@ -335,7 +335,7 @@ tcGen = (\_ v sa -> sa {saTCGen = v}) <$> (kw "texgen" <|> kw "tcgen") <*> (
     val TG_Base "base" <|> 
     TG_Vector <$ kw "vector" <*> v3 <*> v3)
   where
-    v3 = (\_ x y z _ -> Vec3 x y z) <$> kw "(" <*> float <*> float <*> float <*> kw ")"
+    v3 = (\_ x y z _ -> V3 x y z) <$> kw "(" <*> float <*> float <*> float <*> kw ")"
 
 tcMod = (\_ v sa -> sa {saTCMod = v:saTCMod sa}) <$> kw "tcmod" <*> (
     val TM_EntityTranslate "entitytranslate" <|>
