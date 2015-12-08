@@ -155,7 +155,7 @@ mkVertexShader wt uni ca sa (p,n,d,l,c) = (screenPos, (uv, color))
     uv    = mkTexCoord wt uni pos n sa d l
     color = mkColor wt uni ca sa c
 
-mkFragmentShader dSmp lSmp ca sa (uv,rgba) = case saTexture sa of
+mkFragmentShader dSmp lSmp li ca sa (uv,rgba) = case saTexture sa of
     ST_WhiteImage   -> rgba
     ST_Lightmap     -> rgba * texColor3 lSmp
     ST_Map {}       -> rgba * texColor4 dSmp
@@ -164,12 +164,13 @@ mkFragmentShader dSmp lSmp ca sa (uv,rgba) = case saTexture sa of
   where
     lod = if caNoMipMaps ca then SampleLod 0 else SampleAuto
     texColor4 smp = sample2D smp lod Nothing Nothing uv
-    texColor3 smp = v3v4 $ sample2D smp lod Nothing Nothing uv
+    texColor3 smp = v3v4 $ sample2DArray smp lod Nothing (v2v3 uv li)
+    v2v3 (V2 u v) i = V3 u v i
     v3v4 (V3 r g b) = V4 r g b 1
 
-mkFilterFunction dSmp lSmp ca sa uvrgba = case saAlphaFunc sa of
+mkFilterFunction dSmp lSmp li ca sa uvrgba = case saAlphaFunc sa of
     Nothing -> true
-    Just f  -> let V4 _ _ _ a = mkFragmentShader dSmp lSmp ca sa uvrgba
+    Just f  -> let V4 _ _ _ a = mkFragmentShader dSmp lSmp li ca sa uvrgba
                in case f of
                  A_Gt0   -> a >* 0
                  A_Lt128 -> a GPipe.<* 0.5
@@ -208,7 +209,24 @@ mkAccumulationContext StageAttrs{..} = (ContextColorOption blend (pure True), De
         B_SrcColor          -> SrcColor
         B_Zero              -> Zero
 
-mkStage checkerTex texInfo wt uni ca sa = do
+
+mkStage :: (DepthRenderable ds) =>
+    (Texture2DArray os (Format RGBFloat), Buffer os (Uniform (B Float))) ->
+    Texture2D os (Format RGBAFloat) ->
+    T.Trie (Texture2D os (Format RGBAFloat)) ->
+     WaveTable
+     -> (V2 VFloat,
+         (V3 VFloat,
+          VFloat,
+          VFloat,
+          VFloat,
+          V3 VFloat,
+          V3 VFloat,
+          V3 VFloat))
+     -> CommonAttrs
+     -> StageAttrs
+     -> Shader os (ContextFormat RGBAFloat ds) (RenderInput os) ()
+mkStage (lightmapArray, lmIndexBuffer) checkerTex texInfo wt uni ca sa = do
   let (edge,diffuse) = case saTexture sa of
         ST_WhiteImage   -> (Repeat,       checkerTex)
         ST_Lightmap     -> (ClampToEdge,  checkerTex)
@@ -217,16 +235,18 @@ mkStage checkerTex texInfo wt uni ca sa = do
         ST_AnimMap _ (n:l)  -> (Repeat,   lookupTex n) -- TODO
       lookupTex n = maybe checkerTex id $ T.lookup n texInfo
   diffuseSmp  <- newSampler2D (\s -> (diffuse,      SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
-  lightmapSmp <- newSampler2D (\s -> (riLightmap s, SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
+
+  lightmapIndex :: FFloat <- getUniform (\ s -> (lmIndexBuffer, riLightmap s))
+  lightmapSmp <- newSampler2DArray (\s -> (lightmapArray, SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
 
   primitiveStream <- toPrimitiveStream riStream
   fragmentStream <- rasterize (mkRasterContext ca) (mkVertexShader wt uni ca sa <$> primitiveStream)
-  let filteredFragmentStream = filterFragments (mkFilterFunction diffuseSmp lightmapSmp ca sa) fragmentStream
+  let filteredFragmentStream = filterFragments (mkFilterFunction diffuseSmp lightmapSmp lightmapIndex ca sa) fragmentStream
   --drawContextColorDepth (const $ mkAccumulationContext sa) $ withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z + if caPolygonOffset ca then -2 else 0)) (mkFragmentShader sa <$> filteredFragmentStream)
   drawContextColorDepth (const $ mkAccumulationContext sa) $
     withRasterizedInfo
       (\a r -> (a, rasterizedFragCoord r ^. _z))
-      (mkFragmentShader diffuseSmp lightmapSmp ca sa <$> filteredFragmentStream)
+      (mkFragmentShader diffuseSmp lightmapSmp lightmapIndex ca sa <$> filteredFragmentStream)
 
 data WaveTable
   = WaveTable
@@ -247,7 +267,7 @@ data RenderInput os
   = RenderInput
   { riScreenSize  :: V2 Int
   , riStream      :: PrimitiveArray Triangles (B3 Float, B3 Float, B2 Float, B2 Float, B4 Float) --AttInput
-  , riLightmap    :: Texture2D os (Format RGBFloat)
+  , riLightmap    :: Int -- Index into texture array
   }
 
-mkShader checkerTex texInfo wt uni ca = mapM_ (mkStage checkerTex texInfo wt uni ca) $ caStages ca
+mkShader lightMapData checkerTex texInfo wt uni ca = mapM_ (mkStage lightMapData checkerTex texInfo wt uni ca) $ caStages ca
