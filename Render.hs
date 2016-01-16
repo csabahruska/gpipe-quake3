@@ -44,10 +44,10 @@ tessellatePatch drawV level sf@Surface{..} = case srSurfaceType of
       (vl,il)     = unzip $ reverse $ snd $ foldl' (\(o,l) (v,i) -> (o+V.length v, (v,V.map (+o) i):l)) (0,[]) patches
   _ -> mempty
 
-convertSurface BSPLevel{..} indexBufferQ3 vertexBufferQ3 patchInfo sf@Surface{..} = do
+convertSurface BSPLevel{..} indexBufferQ3 vertexBufferQ3 lightmapCount patchInfo sf@Surface{..} = do
   let Shader name sfFlags _ = blShaders V.! srShaderNum
       noDraw = sfFlags .&. 0x80 /= 0
-      lightmap = toFloat srLightmapNum
+      lightmap = toFloat (if srLightmapNum < 0 || srLightmapNum > lightmapCount then lightmapCount else srLightmapNum)
       emitStream prim firstVertex numVertices firstIndex numIndices = if noDraw then return (0,mempty) else do
         vertexArrayQ3 <- (takeVertices numVertices . dropVertices firstVertex) <$> newVertexArray vertexBufferQ3
         indexArrayQ3 <- (takeIndices numIndices . dropIndices firstIndex) <$> newIndexArray indexBufferQ3 Nothing
@@ -123,9 +123,12 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
     -- load lightmap textures
     let toRGB (r:g:b:l) = V3 r g b : toRGB l
         toRGB _ = []
-    lightmapArray <- newTexture2DArray RGB8 (V3 128 128 (V.length blLightmaps)) 1
+        lightmapCount = (V.length blLightmaps)
+    lightmapArray <- newTexture2DArray RGB8 (V3 128 128 (lightmapCount+1)) 1
     V.forM_ (V.indexed blLightmaps) $ \(i, lm) ->
       writeTexture2DArray lightmapArray 0 (V3 0 0 i) (V3 128 128 1) $ toRGB . SB.unpack . lmMap $ lm
+    -- Write a white texture last
+    writeTexture2DArray lightmapArray 0 (V3 0 0 lightmapCount) (V3 128 128 1) (repeat (V3 1 1 (1::Float)))
 
     -- load diffuse textures
     checkerTex <- newTexture2D RGBA8 (V2 8 8) 1
@@ -160,7 +163,7 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
     --  create shader for each material
     usedShaders <- mapM (\Shader{..} -> maybe (return missingMaterialShader) (compileMaterial lightmapArray checkerTex texInfo tables uniformBuffer) $ T.lookup shName shaderInfo) blShaders
     let surfaces vpSize = do
-          surface0 <- zipWithM (convertSurface bsp indexBufferQ3 vertexBufferQ3) patchInfo $ V.toList blSurfaces
+          surface0 <- zipWithM (convertSurface bsp indexBufferQ3 vertexBufferQ3 lightmapCount) patchInfo $ V.toList blSurfaces
           -- group surfaces by material
           let surface1 = Map.unionsWith mappend . map (\(k,v) -> Map.singleton k [v]) $ surface0
               --surface1 = Map.unionsWith mappend . map (uncurry Map.singleton) $ surface0
