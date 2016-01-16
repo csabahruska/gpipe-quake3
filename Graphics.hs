@@ -145,7 +145,7 @@ uniform tuple:
       (V3 Float, Float,       Float,         Float, V3 Float,   V3 Float,   V3 Float)
 -}
 
-mkVertexShader wt uni ca sa (p,n,d,l,c) = (screenPos, (uv, color))
+mkVertexShader wt uni ca sa (li, (p,n,d,l,c)) = (screenPos, (uv, color, Flat li))
   where
     viewMat     = lookAt' (viewOrigin uni) (viewTarget uni) (viewUp uni)
     V2 w h      = windowSize uni
@@ -155,7 +155,7 @@ mkVertexShader wt uni ca sa (p,n,d,l,c) = (screenPos, (uv, color))
     uv    = mkTexCoord wt uni pos n sa d l
     color = mkColor wt uni ca sa c
 
-mkFragmentShader dSmp lSmp ca sa (uv,rgba) = case saTexture sa of
+mkFragmentShader dSmp lSmp ca sa (uv,rgba, li) = case saTexture sa of
     ST_WhiteImage   -> rgba
     ST_Lightmap     -> rgba * texColor3 lSmp
     ST_Map {}       -> rgba * texColor4 dSmp
@@ -164,7 +164,8 @@ mkFragmentShader dSmp lSmp ca sa (uv,rgba) = case saTexture sa of
   where
     lod = if caNoMipMaps ca then SampleLod 0 else SampleAuto
     texColor4 smp = sample2D smp lod Nothing Nothing uv
-    texColor3 smp = v3v4 $ sample2D smp lod Nothing Nothing uv
+    texColor3 smp = v3v4 $ sample2DArray smp lod Nothing (v2v3 uv li)
+    v2v3 (V2 u v) i = V3 u v i
     v3v4 (V3 r g b) = V4 r g b 1
 
 mkFilterFunction dSmp lSmp ca sa uvrgba = case saAlphaFunc sa of
@@ -208,7 +209,7 @@ mkAccumulationContext StageAttrs{..} = (ContextColorOption blend (pure True), De
         B_SrcColor          -> SrcColor
         B_Zero              -> Zero
 
-mkStage checkerTex texInfo wt uni ca sa = do
+mkStage lightmapArray checkerTex texInfo wt uni ca sa = do
   let (edge,diffuse) = case saTexture sa of
         ST_WhiteImage   -> (Repeat,       checkerTex)
         ST_Lightmap     -> (ClampToEdge,  checkerTex)
@@ -217,7 +218,7 @@ mkStage checkerTex texInfo wt uni ca sa = do
         ST_AnimMap _ (n:l)  -> (Repeat,   lookupTex n) -- TODO
       lookupTex n = maybe checkerTex id $ T.lookup n texInfo
   diffuseSmp  <- newSampler2D (\s -> (diffuse,      SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
-  lightmapSmp <- newSampler2D (\s -> (riLightmap s, SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
+  lightmapSmp <- newSampler2DArray (\s -> (lightmapArray, SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
 
   primitiveStream <- toPrimitiveStream riStream
   fragmentStream <- rasterize (mkRasterContext ca) (mkVertexShader wt uni ca sa <$> primitiveStream)
@@ -246,8 +247,7 @@ type Tables os = (Texture1D os (Format RFloat), Texture1D os (Format RFloat), Te
 data RenderInput os
   = RenderInput
   { riScreenSize  :: V2 Int
-  , riStream      :: PrimitiveArray Triangles (B3 Float, B3 Float, B2 Float, B2 Float, B4 Float) --AttInput
-  , riLightmap    :: Texture2D os (Format RGBFloat)
+  , riStream      :: PrimitiveArray Triangles (Float, (B3 Float, B3 Float, B2 Float, B2 Float, B4 Float)) --(Float, AttInput)
   }
 
-mkShader checkerTex texInfo wt uni ca = mapM_ (mkStage checkerTex texInfo wt uni ca) $ caStages ca
+mkShader lightMap checkerTex texInfo wt uni ca = mapM_ (mkStage lightMap checkerTex texInfo wt uni ca) $ caStages ca

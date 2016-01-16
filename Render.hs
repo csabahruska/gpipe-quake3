@@ -44,16 +44,16 @@ tessellatePatch drawV level sf@Surface{..} = case srSurfaceType of
       (vl,il)     = unzip $ reverse $ snd $ foldl' (\(o,l) (v,i) -> (o+V.length v, (v,V.map (+o) i):l)) (0,[]) patches
   _ -> mempty
 
-convertSurface BSPLevel{..} indexBufferQ3 vertexBufferQ3 whiteTex lightmaps patchInfo sf@Surface{..} = do
+convertSurface BSPLevel{..} indexBufferQ3 vertexBufferQ3 patchInfo sf@Surface{..} = do
   let Shader name sfFlags _ = blShaders V.! srShaderNum
       noDraw = sfFlags .&. 0x80 /= 0
-      lightmap = maybe whiteTex id $ lightmaps V.!? srLightmapNum
-      emitStream prim firstVertex numVertices firstIndex numIndices = if noDraw then return (0,(whiteTex,mempty)) else do
+      lightmap = toFloat srLightmapNum
+      emitStream prim firstVertex numVertices firstIndex numIndices = if noDraw then return (0,mempty) else do
         vertexArrayQ3 <- (takeVertices numVertices . dropVertices firstVertex) <$> newVertexArray vertexBufferQ3
         indexArrayQ3 <- (takeIndices numIndices . dropIndices firstIndex) <$> newIndexArray indexBufferQ3 Nothing
-        return (srShaderNum,(lightmap, toPrimitiveArrayIndexed prim indexArrayQ3 vertexArrayQ3))
+        return (srShaderNum, (,) lightmap <$> toPrimitiveArrayIndexed prim indexArrayQ3 vertexArrayQ3)
   case srSurfaceType of
-    Flare -> return (srShaderNum,(whiteTex,mempty))
+    Flare -> return (srShaderNum,mempty)
     Patch -> let ((firstVertex,firstIndex),(numVertices,numIndices)) = patchInfo
              in emitStream TriangleStrip firstVertex numVertices firstIndex numIndices
     _ -> emitStream TriangleList srFirstVertex srNumVertices srFirstIndex srNumIndices
@@ -69,7 +69,7 @@ type Tables os = (Texture1D os (Format RFloat),
 type UniInput = (B2 Int32, (B3 Float, B Float, B Float, B Float, B3 Float, B3 Float, B3 Float))
 
 missingMaterial :: (MonadIO m, MonadException m) => Buffer os (Uniform UniInput) -> ContextT w os CF m (CompiledShader os CF (RenderInput os))
-missingMaterial uniformBuffer = do 
+missingMaterial uniformBuffer = do
  liftIO (putStr "-")
  compileShader $ do
   uni <- getUniform (const (uniformBuffer,0))
@@ -78,13 +78,13 @@ missingMaterial uniformBuffer = do
       V2 w h  = windowSize uni
       projMat = perspective (pi/3) (toFloat w / toFloat h) 1 10000
       make3d (V3 x y z) = projMat !*! viewMat !* V4 x y z 1
-      primitiveStream2 = fmap (\(pos,_,_,_,color) -> (make3d pos, color)) primitiveStream
+      primitiveStream2 = fmap (\(_, (pos,_,_,_,color)) -> (make3d pos, color)) primitiveStream
   fragmentStream <- rasterize (\ri -> (FrontAndBack, ViewPort (V2 0 0) (riScreenSize ri), DepthRange 0 1)) primitiveStream2
   let fragmentStream2 = withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) fragmentStream
   drawContextColorDepth (const (ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream2
 
-compileMaterial :: (MonadIO m, MonadException m) => Texture2D os (Format RGBAFloat) -> T.Trie (Texture2D os (Format RGBAFloat)) -> Tables os -> Buffer os (Uniform UniInput) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF (RenderInput os))
-compileMaterial checkerTex texInfo tables uniformBuffer shaderInfo = do
+compileMaterial :: (MonadIO m, MonadException m) => (Texture2DArray os (Format RGBFloat)) -> Texture2D os (Format RGBAFloat) -> T.Trie (Texture2D os (Format RGBAFloat)) -> Tables os -> Buffer os (Uniform UniInput) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF (RenderInput os))
+compileMaterial lightMap checkerTex texInfo tables uniformBuffer shaderInfo = do
  liftIO (putStr ".")
  compileShader $ do
   uni <- getUniform (const (uniformBuffer,0))
@@ -97,7 +97,7 @@ compileMaterial checkerTex texInfo tables uniformBuffer shaderInfo = do
                   <*> newSampler1D (const (invSawT, filter, edge))
                   <*> newSampler1D (const (triT, filter, edge))
                   <*> newSampler1D (const (triT, filter, edge)) -- TODO: generate noise
-  mkShader checkerTex texInfo wt uni shaderInfo
+  mkShader lightMap checkerTex texInfo wt uni shaderInfo
 
 renderQuake :: V3 Float -> BSPLevel -> T.Trie CommonAttrs -> T.Trie DynamicImage -> IO ()
 renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
@@ -113,7 +113,7 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
     writeBuffer vertexBufferQ3 0 [(dvPosition, dvNormal, dvDiffuseUV, dvLightmaptUV, dvColor) | DrawVertex{..} <- V.toList verticesQ3]
 
     indexBufferQ3 :: Buffer os (B Word32) <- newBuffer $ V.length indicesQ3
-    writeBuffer indexBufferQ3 0 $ map fromIntegral $ V.toList indicesQ3 
+    writeBuffer indexBufferQ3 0 $ map fromIntegral $ V.toList indicesQ3
 
     -- for wave functions
     tables <- setupTables
@@ -123,12 +123,9 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
     -- load lightmap textures
     let toRGB (r:g:b:l) = V3 r g b : toRGB l
         toRGB _ = []
-    lightmaps <- V.forM blLightmaps $ \lm -> do
-      lightmap <- newTexture2D RGB8 (V2 128 128) 1
-      writeTexture2D lightmap 0 (V2 0 0) (V2 128 128) $ toRGB . SB.unpack . lmMap $ lm
-      return lightmap
-    whiteTex <- newTexture2D RGB8 (V2 1 1) 1
-    writeTexture2D whiteTex 0 (V2 0 0) (V2 1 1) [V3 (1 :: Float) 1 1]
+    lightmapArray <- newTexture2DArray RGB8 (V3 128 128 (V.length blLightmaps)) 1
+    V.forM_ (V.indexed blLightmaps) $ \(i, lm) ->
+      writeTexture2DArray lightmapArray 0 (V3 0 0 i) (V3 128 128 1) $ toRGB . SB.unpack . lmMap $ lm
 
     -- load diffuse textures
     checkerTex <- newTexture2D RGBA8 (V2 8 8) 1
@@ -161,9 +158,9 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
     missingMaterialShader <- missingMaterial uniformBuffer
 
     --  create shader for each material
-    usedShaders <- mapM (\Shader{..} -> maybe (return missingMaterialShader) (compileMaterial checkerTex texInfo tables uniformBuffer) $ T.lookup shName shaderInfo) blShaders
+    usedShaders <- mapM (\Shader{..} -> maybe (return missingMaterialShader) (compileMaterial lightmapArray checkerTex texInfo tables uniformBuffer) $ T.lookup shName shaderInfo) blShaders
     let surfaces vpSize = do
-          surface0 <- zipWithM (convertSurface bsp indexBufferQ3 vertexBufferQ3 whiteTex lightmaps) patchInfo $ V.toList blSurfaces
+          surface0 <- zipWithM (convertSurface bsp indexBufferQ3 vertexBufferQ3) patchInfo $ V.toList blSurfaces
           -- group surfaces by material
           let surface1 = Map.unionsWith mappend . map (\(k,v) -> Map.singleton k [v]) $ surface0
               --surface1 = Map.unionsWith mappend . map (uncurry Map.singleton) $ surface0
@@ -172,7 +169,7 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
                   ( caSort <$> T.lookup (shName $ blShaders V.! shader) shaderInfo
                   -- pass to shader every per render varying input
                   --  geometry, diffuse texture, lightmap texture
-                  , mapM_ (\(lightmap,stream) -> (usedShaders V.! shader) (RenderInput vpSize stream lightmap)) surface
+                  , (usedShaders V.! shader) (RenderInput vpSize (mconcat surface))
                   )
                 ) surface1
               -- sort surfaces by render queue
