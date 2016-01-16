@@ -47,13 +47,13 @@ tessellatePatch drawV level sf@Surface{..} = case srSurfaceType of
 convertSurface BSPLevel{..} indexBufferQ3 vertexBufferQ3 patchInfo sf@Surface{..} = do
   let Shader name sfFlags _ = blShaders V.! srShaderNum
       noDraw = sfFlags .&. 0x80 /= 0
-      lightmap = srLightmapNum -- maybe whiteTex id $ lightmaps V.!?
-      emitStream prim firstVertex numVertices firstIndex numIndices = if noDraw then return (0,(-1,mempty)) else do
+      lightmap = toFloat srLightmapNum -- maybe whiteTex id $ lightmaps V.!?
+      emitStream prim firstVertex numVertices firstIndex numIndices = if noDraw then return (0,mempty) else do
         vertexArrayQ3 <- (takeVertices numVertices . dropVertices firstVertex) <$> newVertexArray vertexBufferQ3
         indexArrayQ3 <- (takeIndices numIndices . dropIndices firstIndex) <$> newIndexArray indexBufferQ3 Nothing
-        return (srShaderNum,(lightmap, toPrimitiveArrayIndexed prim indexArrayQ3 vertexArrayQ3))
+        return (srShaderNum, (,) lightmap <$> toPrimitiveArrayIndexed prim indexArrayQ3 vertexArrayQ3)
   case srSurfaceType of
-    Flare -> return (srShaderNum,(-1,mempty))
+    Flare -> return (srShaderNum,mempty)
     Patch -> let ((firstVertex,firstIndex),(numVertices,numIndices)) = patchInfo
              in emitStream TriangleStrip firstVertex numVertices firstIndex numIndices
     _ -> emitStream TriangleList srFirstVertex srNumVertices srFirstIndex srNumIndices
@@ -78,7 +78,7 @@ missingMaterial uniformBuffer = do
       V2 w h  = windowSize uni
       projMat = perspective (pi/3) (toFloat w / toFloat h) 1 10000
       make3d (V3 x y z) = projMat !*! viewMat !* V4 x y z 1
-      primitiveStream2 = fmap (\(pos,_,_,_,color) -> (make3d pos, color)) primitiveStream
+      primitiveStream2 = fmap (\(_, (pos,_,_,_,color)) -> (make3d pos, color)) primitiveStream
   fragmentStream <- rasterize (\ri -> (FrontAndBack, ViewPort (V2 0 0) (riScreenSize ri), DepthRange 0 1)) primitiveStream2
   let fragmentStream2 = withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) fragmentStream
   drawContextColorDepth (const (ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream2
@@ -124,7 +124,7 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
     let toRGB (r:g:b:l) = V3 r g b : toRGB l
         toRGB _ = []
     lightmapArray <- newTexture2DArray RGB8 (V3 128 128 (V.length blLightmaps)) 1
-    V.forM_ (V.indexed blLightmaps) $ \(i, lm) -> do
+    V.forM_ (V.indexed blLightmaps) $ \(i, lm) ->
       writeTexture2DArray lightmapArray 0 (V3 0 0 i) (V3 128 128 1) $ toRGB . SB.unpack . lmMap $ lm
     -- Hacky, will be solved in future GPipe version that has custom Uniforms
     lmIndexBuffer :: Buffer os (Uniform (B Float)) <- newBuffer (V.length blLightmaps)
@@ -176,7 +176,7 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
                   ( caSort <$> T.lookup (shName $ blShaders V.! shader) shaderInfo
                   -- pass to shader every per render varying input
                   --  geometry, diffuse texture, lightmap texture
-                  , (usedShaders V.! shader) (RenderInput vpSize (mconcat $ map snd surface) (map fst surface))
+                  , (usedShaders V.! shader) (RenderInput vpSize (mconcat surface))
                   )
                 ) surface1
               -- sort surfaces by render queue
