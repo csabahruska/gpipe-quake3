@@ -9,7 +9,6 @@ import qualified Data.Trie as T
 import Data.Maybe
 import "lens" Control.Lens
 import Control.Monad.IO.Class
-import Data.Int
 
 import Material hiding (Blending)
 
@@ -210,24 +209,7 @@ mkAccumulationContext StageAttrs{..} = (ContextColorOption blend (pure True), De
         B_SrcColor          -> SrcColor
         B_Zero              -> Zero
 
-
-mkStage :: (DepthRenderable ds) =>
-    (Texture2DArray os (Format RGBFloat), Buffer os (Uniform (B Float))) ->
-    Texture2D os (Format RGBAFloat) ->
-    T.Trie (Texture2D os (Format RGBAFloat)) ->
-     WaveTable
-     -> (V2 VInt,
-         (V3 VFloat,
-          VFloat,
-          VFloat,
-          VFloat,
-          V3 VFloat,
-          V3 VFloat,
-          V3 VFloat))
-     -> CommonAttrs
-     -> StageAttrs
-     -> Shader os (ContextFormat RGBAFloat ds) (RenderInput os) ()
-mkStage (lightmapArray, lmIndexBuffer) checkerTex texInfo wt uni ca sa = do
+mkStage lightmapArray checkerTex texInfo wt uni ca sa = do
   let (edge,diffuse) = case saTexture sa of
         ST_WhiteImage   -> (Repeat,       checkerTex)
         ST_Lightmap     -> (ClampToEdge,  checkerTex)
@@ -236,7 +218,6 @@ mkStage (lightmapArray, lmIndexBuffer) checkerTex texInfo wt uni ca sa = do
         ST_AnimMap _ (n:l)  -> (Repeat,   lookupTex n) -- TODO
       lookupTex n = maybe checkerTex id $ T.lookup n texInfo
   diffuseSmp  <- newSampler2D (\s -> (diffuse,      SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
-
   lightmapSmp <- newSampler2DArray (\s -> (lightmapArray, SamplerFilter Linear Linear Linear Nothing, (pure edge, undefined)))
 
   primitiveStream <- toPrimitiveStream riStream
@@ -269,4 +250,4 @@ data RenderInput os
   , riStream      :: PrimitiveArray Triangles (Float, (B3 Float, B3 Float, B2 Float, B2 Float, B4 Float)) --(Float, AttInput)
   }
 
-mkShader lightMapData checkerTex texInfo wt uni ca = mapM_ (mkStage lightMapData checkerTex texInfo wt uni ca) $ caStages ca
+mkShader lightMap checkerTex texInfo wt uni ca = mapM_ (mkStage lightMap checkerTex texInfo wt uni ca) $ caStages ca

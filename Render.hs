@@ -47,7 +47,7 @@ tessellatePatch drawV level sf@Surface{..} = case srSurfaceType of
 convertSurface BSPLevel{..} indexBufferQ3 vertexBufferQ3 patchInfo sf@Surface{..} = do
   let Shader name sfFlags _ = blShaders V.! srShaderNum
       noDraw = sfFlags .&. 0x80 /= 0
-      lightmap = toFloat srLightmapNum -- maybe whiteTex id $ lightmaps V.!?
+      lightmap = toFloat srLightmapNum
       emitStream prim firstVertex numVertices firstIndex numIndices = if noDraw then return (0,mempty) else do
         vertexArrayQ3 <- (takeVertices numVertices . dropVertices firstVertex) <$> newVertexArray vertexBufferQ3
         indexArrayQ3 <- (takeIndices numIndices . dropIndices firstIndex) <$> newIndexArray indexBufferQ3 Nothing
@@ -83,8 +83,8 @@ missingMaterial uniformBuffer = do
   let fragmentStream2 = withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) fragmentStream
   drawContextColorDepth (const (ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream2
 
-compileMaterial :: (MonadIO m, MonadException m) => (Texture2DArray os (Format RGBFloat), Buffer os (Uniform (B Float))) -> Texture2D os (Format RGBAFloat) -> T.Trie (Texture2D os (Format RGBAFloat)) -> Tables os -> Buffer os (Uniform UniInput) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF (RenderInput os))
-compileMaterial lightMapData checkerTex texInfo tables uniformBuffer shaderInfo = do
+compileMaterial :: (MonadIO m, MonadException m) => (Texture2DArray os (Format RGBFloat)) -> Texture2D os (Format RGBAFloat) -> T.Trie (Texture2D os (Format RGBAFloat)) -> Tables os -> Buffer os (Uniform UniInput) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF (RenderInput os))
+compileMaterial lightMap checkerTex texInfo tables uniformBuffer shaderInfo = do
  liftIO (putStr ".")
  compileShader $ do
   uni <- getUniform (const (uniformBuffer,0))
@@ -97,7 +97,7 @@ compileMaterial lightMapData checkerTex texInfo tables uniformBuffer shaderInfo 
                   <*> newSampler1D (const (invSawT, filter, edge))
                   <*> newSampler1D (const (triT, filter, edge))
                   <*> newSampler1D (const (triT, filter, edge)) -- TODO: generate noise
-  mkShader lightMapData checkerTex texInfo wt uni shaderInfo
+  mkShader lightMap checkerTex texInfo wt uni shaderInfo
 
 renderQuake :: V3 Float -> BSPLevel -> T.Trie CommonAttrs -> T.Trie DynamicImage -> IO ()
 renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
@@ -126,13 +126,6 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
     lightmapArray <- newTexture2DArray RGB8 (V3 128 128 (V.length blLightmaps)) 1
     V.forM_ (V.indexed blLightmaps) $ \(i, lm) ->
       writeTexture2DArray lightmapArray 0 (V3 0 0 i) (V3 128 128 1) $ toRGB . SB.unpack . lmMap $ lm
-    -- Hacky, will be solved in future GPipe version that has custom Uniforms
-    lmIndexBuffer :: Buffer os (Uniform (B Float)) <- newBuffer (V.length blLightmaps)
-    writeBuffer lmIndexBuffer 0 [0,1..]
-    let lightMapData = (lightmapArray, lmIndexBuffer)
-
-    whiteTex <- newTexture2D RGB8 (V2 1 1) 1
-    writeTexture2D whiteTex 0 (V2 0 0) (V2 1 1) [V3 (1 :: Float) 1 1]
 
     -- load diffuse textures
     checkerTex <- newTexture2D RGBA8 (V2 8 8) 1
@@ -165,7 +158,7 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
     missingMaterialShader <- missingMaterial uniformBuffer
 
     --  create shader for each material
-    usedShaders <- mapM (\Shader{..} -> maybe (return missingMaterialShader) (compileMaterial lightMapData checkerTex texInfo tables uniformBuffer) $ T.lookup shName shaderInfo) blShaders
+    usedShaders <- mapM (\Shader{..} -> maybe (return missingMaterialShader) (compileMaterial lightmapArray checkerTex texInfo tables uniformBuffer) $ T.lookup shName shaderInfo) blShaders
     let surfaces vpSize = do
           surface0 <- zipWithM (convertSurface bsp indexBufferQ3 vertexBufferQ3) patchInfo $ V.toList blSurfaces
           -- group surfaces by material
