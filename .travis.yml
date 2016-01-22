@@ -1,0 +1,37 @@
+# For further information on this Travis setup:
+#   http://docs.haskellstack.org/en/stable/GUIDE.html#travis-with-caching
+
+# use new container infrastructure to allow caching
+sudo: false
+
+# choose light-weight base image
+language: c
+
+addons:
+  apt:
+    packages:
+    - libgmp-dev      # for ghc
+    - libxxf86vm-dev  # for GLFW
+
+# different configurations:
+env:
+  - ARGS="--resolver nightly-2016-01-22"
+
+before_install:
+# Download and unpack the stack executable
+- mkdir -p ~/.local/bin
+- export PATH=$HOME/.local/bin:$PATH
+- travis_retry curl -L https://www.stackage.org/stack/linux-x86_64 | tar xz --wildcards --strip-components=1 -C ~/.local/bin '*/stack'
+# Setup stack
+- stack --no-terminal setup
+# Install hscolour to remove some haddock warnings; try removing when 
+# changing to a stable Stack resolver.
+- stack --no-terminal install hscolour
+
+# build
+script: stack $ARGS --no-terminal --install-ghc test --haddock
+
+# set up caching
+cache:
+  directories:
+  - $HOME/.stack
