@@ -125,12 +125,12 @@ parseEntities n s = eval n $ parse entities s
         Fail _ c _  -> error $ show (n,"Fail",c)
         Partial f'  -> eval n (f' "")
 
-loadQ3Texture :: T.Trie Entry -> SB.ByteString -> Maybe DynamicImage
+loadQ3Texture :: T.Trie Entry -> SB.ByteString -> Maybe (Image PixelRGBA8)
 loadQ3Texture ar name = case T.lookup fname ar of
   Nothing -> Nothing
   Just d  -> case decodeImage $ decompress d of
     Left msg  -> Nothing
-    Right img -> Just img
+    Right img -> Just $ convertRGBA8 img
  where
   name' = SB.unpack name
   n1 = SB.pack $ replaceExtension name' "tga"

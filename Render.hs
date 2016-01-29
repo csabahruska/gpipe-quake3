@@ -17,7 +17,7 @@ import qualified Data.Map as Map
 import qualified Data.Trie as T
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable as SV
-import Codec.Picture
+import Codec.Picture as Juicy
 import Codec.Picture.Types
 import Data.Bits
 import Data.Int
@@ -99,7 +99,7 @@ compileMaterial lightMap checkerTex texInfo tables uniformBuffer shaderInfo = do
                   <*> newSampler1D (const (triT, filter, edge)) -- TODO: generate noise
   mkShader lightMap checkerTex texInfo wt uni shaderInfo
 
-renderQuake :: V3 Float -> BSPLevel -> T.Trie CommonAttrs -> T.Trie DynamicImage -> IO ()
+renderQuake :: V3 Float -> BSPLevel -> T.Trie CommonAttrs -> T.Trie (Juicy.Image PixelRGBA8) -> IO ()
 renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
   runContextT GLFW.newContext (ContextFormatColorDepth RGBA32F Depth32) $ do
     -- pre tesselate patches and append to static draw verices and indices
@@ -136,26 +136,12 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
         blackWhite = tail whiteBlack
     writeTexture2D checkerTex 0 0 (V2 8 8) (cycle (take 8 whiteBlack ++ take 8 blackWhite))
 
-    let mkTex w h l = do
+    let mkTex i@(Image w h _) = do
           tex <- newTexture2D SRGB8A8 (V2 w h) (floor ((max (log (fromIntegral w :: Float)) (log (fromIntegral h :: Float))) / log 2) :: Int)
-          writeTexture2D tex 0 0 (V2 w h) l
+          writeTexture2D tex 0 0 (V2 w h) $ pixelFoldMap (\(PixelRGBA8 r g b a) -> [V4 r g b a]) i
           generateTexture2DMipmap tex
           return tex
-    texInfo <- sequence $ flip fmap imageInfo $ \case
-      ImageRGB8 i@(Image w h _)   -> mkTex w h $ pixelFoldMap (\(PixelRGB8 r g b) -> [V4 r g b maxBound]) i
-      ImageRGBA8 i@(Image w h _)  -> mkTex w h $ pixelFoldMap (\(PixelRGBA8 r g b a) -> [V4 r g b a]) i
-      ImageYCbCr8 i@(Image w h _) -> mkTex w h $ pixelFoldMap (\p -> let PixelRGB8 r g b = convertPixel p in [V4 r g b maxBound]) i
-      ImageCMYK16 _ -> liftIO (putStrLn "ImageCMYK16") >> return checkerTex
-      ImageCMYK8 _ -> liftIO (putStrLn "ImageCMYK8") >> return checkerTex
-      ImageRGBA16 _ -> liftIO (putStrLn "ImageRGBA16") >> return checkerTex
-      ImageRGBF _ -> liftIO (putStrLn "ImageRGBF") >> return checkerTex
-      ImageRGB16 _ -> liftIO (putStrLn "ImageRGB16") >> return checkerTex
-      ImageYA16 _ -> liftIO (putStrLn "ImageYA16") >> return checkerTex
-      ImageYA8 _ -> liftIO (putStrLn "ImageYA8") >> return checkerTex
-      ImageYF _ -> liftIO (putStrLn "ImageYF") >> return checkerTex
-      ImageY16 _ -> liftIO (putStrLn "ImageY16") >> return checkerTex
-      ImageY8 _ -> liftIO (putStrLn "ImageY8") >> return checkerTex
-      _ -> liftIO (putStrLn ";") >> return checkerTex
+    texInfo <- sequence $ mkTex <$> imageInfo
 
     -- shader for unknown materials
     missingMaterialShader <- missingMaterial uniformBuffer
