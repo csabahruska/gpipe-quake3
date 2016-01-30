@@ -15,7 +15,7 @@ addons:
 
 # different configurations:
 env:
-  - ARGS="--resolver nightly-2016-01-22"
+  - ARGS="--resolver nightly-2016-01-30"
 
 before_install:
 # Download and unpack the stack executable
