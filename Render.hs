@@ -5,6 +5,7 @@ import Control.Monad.Exception (MonadException)
 import Control.Monad.IO.Class
 import Graphics.GPipe
 import qualified "GPipe-GLFW" Graphics.GPipe.Context.GLFW as GLFW
+import qualified "GPipe-GLFW" Graphics.GPipe.Context.GLFW.Input as Input
 import qualified "GLFW-b" Graphics.UI.GLFW as GLFWb
 import "lens" Control.Lens
 import Control.Monad (unless,zipWithM,forM)
@@ -101,7 +102,7 @@ compileMaterial lightMap checkerTex texInfo tables uniformBuffer shaderInfo = do
 
 renderQuake :: V3 Float -> BSPLevel -> T.Trie CommonAttrs -> T.Trie (Juicy.Image PixelRGBA8) -> IO ()
 renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
-  runContextT GLFW.newContext (ContextFormatColorDepth RGBA32F Depth32) $ do
+  runContextT (GLFW.simpleContext "Q3 Viewer") (ContextFormatColorDepth RGBA32F Depth32) $ do
     -- pre tesselate patches and append to static draw verices and indices
     let patches     = map (tessellatePatch blDrawVertices 5) $ V.toList blSurfaces
         (verticesQ3,indicesQ3) = mconcat $ (blDrawVertices,blDrawIndices):patches
@@ -173,13 +174,13 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
 
 renderLoop uniformBuffer s t renderings = do
   -- read input
-  (mx,my) <- GLFW.getCursorPos
-  let keyIsPressed k = fmap (== GLFW.KeyState'Pressed) $ GLFW.getKey k
-  keys <- (,,,,) <$> keyIsPressed GLFW.Key'Left
-                 <*> keyIsPressed GLFW.Key'Up
-                 <*> keyIsPressed GLFW.Key'Down
-                 <*> keyIsPressed GLFW.Key'Right
-                 <*> keyIsPressed GLFW.Key'RightShift
+  (mx,my) <- Input.getCursorPos
+  let keyIsPressed k = fmap (== Input.KeyState'Pressed) $ Input.getKey k
+  keys <- (,,,,) <$> keyIsPressed Input.Key'Left
+                 <*> keyIsPressed Input.Key'Up
+                 <*> keyIsPressed Input.Key'Down
+                 <*> keyIsPressed Input.Key'Right
+                 <*> keyIsPressed Input.Key'RightShift
   Just t' <- liftIO $ GLFWb.getTime
 
   size <- getContextBuffersSize
@@ -197,7 +198,7 @@ renderLoop uniformBuffer s t renderings = do
     renderings size
 
   swapContextBuffers
-  closeRequested <- GLFW.windowShouldClose
+  closeRequested <- Input.windowShouldClose
   unless closeRequested $ do
     liftIO $ do
       GLFWb.pollEvents

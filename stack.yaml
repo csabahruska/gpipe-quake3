@@ -1,12 +1,21 @@
 # For more information, see: http://docs.haskellstack.org/en/stable/yaml_configuration.html
 
 # Specifies the GHC version and set of packages available (e.g., lts-3.5, nightly-2015-09-21, ghc-7.10.2)
-resolver: nightly-2016-01-30
+resolver: lts-7.8
 
 # Local packages, usually specified by relative directory name
 packages:
 - '.'
-
+- location:
+    git: git@github.com:plredmond/GPipe-Core.git
+    commit: 78a7120973d7aaa1783e15298f9e59ad4b666027
+  subdirs: [ GPipe-Core ]
+  extra-dep: true
+- location:
+    git: git@github.com:plredmond/GPipe-GLFW.git
+    commit: 702257114ce9980a89a853b369a8ca221e0a3dd3
+  subdirs: [ GPipe-GLFW ]
+  extra-dep: true
 # Packages to be pulled from upstream that are not in the resolver (e.g., acme-missiles-0.3)
 extra-deps: []
 
