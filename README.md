@@ -12,6 +12,8 @@ $ cabal install
 $ gpipe-quake3 q3dm1
 ```
 
+[Short gifv](http://imgur.com/a/BRTqh)
+
 ![Quake III level viewer](https://raw.githubusercontent.com/csabahruska/gpipe-quake3/master/qpipe-quake3.jpg)
 
 ## Optional: Stack build
