@@ -19,25 +19,25 @@ executable gpipe-quake3
   main-is:             Main.hs
   -- other-modules:
   other-extensions:    OverloadedStrings, TypeOperators, DataKinds, PackageImports, TupleSections, ScopedTypeVariables, TypeFamilies, FlexibleContexts, RecordWildCards
-  build-depends:       base >=4.8 && <4.9,
-                       binary >=0.7 && <0.8,
+  build-depends:       base >=4.8 && <4.10,
+                       binary >=0.7 && <0.9,
                        data-binary-ieee754 >=0.4 && <0.5,
                        linear >= 1.20 && <1.21,
-                       vector >=0.11 && <0.12,
+                       vector,
                        bytestring >=0.10 && <0.11,
                        pretty-show >=1.6 && <1.7,
                        attoparsec >=0.13 && <0.14,
-                       directory >=1.2 && <1.3,
+                       directory,
                        filepath >=1.4 && <1.5,
                        containers >=0.5 && <0.6,
                        bytestring-trie >=0.2 && <0.3,
-                       transformers >=0.4 && <0.5,
-                       GPipe >=2.1.7 && <2.2,
+                       transformers >=0.4 && <0.6,
+                       GPipe,
                        mmap >=0.5 && <0.6,
                        zlib >=0.6 && <0.7,
                        GLFW-b >= 1.4 && <1.5,
-                       lens >= 4.12 && <4.14,
-                       GPipe-GLFW >= 1.2 && <1.3,
+                       lens,
+                       GPipe-GLFW,
                        JuicyPixels >=3.2.7 && <3.3,
                        exception-transformers >= 0.4 && <0.5
   -- hs-source-dirs:
