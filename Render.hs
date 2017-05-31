@@ -4,9 +4,8 @@ module Render where
 import Control.Monad.Exception (MonadException)
 import Control.Monad.IO.Class
 import Graphics.GPipe
-import qualified "GPipe-GLFW" Graphics.GPipe.Context.GLFW as GLFW
-import qualified "GPipe-GLFW" Graphics.GPipe.Context.GLFW.Input as Input
-import qualified "GLFW-b" Graphics.UI.GLFW as GLFWb
+import qualified Graphics.GPipe.Context.GLFW as GLFW
+import qualified Graphics.GPipe.Context.GLFW.Input as Input
 import "lens" Control.Lens
 import Control.Monad (unless,zipWithM,forM)
 import Data.Word (Word32,Word8)
@@ -59,7 +58,7 @@ convertSurface BSPLevel{..} indexBufferQ3 vertexBufferQ3 lightmapCount patchInfo
              in emitStream TriangleStrip firstVertex numVertices firstIndex numIndices
     _ -> emitStream TriangleList srFirstVertex srNumVertices srFirstIndex srNumIndices
 
-type CF = ContextFormat RGBAFloat Depth
+type CF = WindowFormat RGBAFloat Depth
 type AttInput = (B3 Float, B3 Float, B2 Float, B2 Float, B4 Float)
 type A = PrimitiveArray Triangles AttInput
 type Tables os = (Texture1D os (Format RFloat),
@@ -69,8 +68,8 @@ type Tables os = (Texture1D os (Format RFloat),
                   Texture1D os (Format RFloat))
 type UniInput = (B2 Int32, (B3 Float, B Float, B Float, B Float, B3 Float, B3 Float, B3 Float))
 
-missingMaterial :: (MonadIO m, MonadException m) => Buffer os (Uniform UniInput) -> ContextT w os CF m (CompiledShader os CF (RenderInput os))
-missingMaterial uniformBuffer = do
+missingMaterial :: (ContextHandler w, MonadIO m, MonadException m) => Window os RGBAFloat Depth -> Buffer os (Uniform UniInput) -> ContextT w os m (CompiledShader os (RenderInput os))
+missingMaterial win uniformBuffer = do
  liftIO (putStr "-")
  compileShader $ do
   uni <- getUniform (const (uniformBuffer,0))
@@ -82,10 +81,10 @@ missingMaterial uniformBuffer = do
       primitiveStream2 = fmap (\(_, (pos,_,_,_,color)) -> (make3d pos, color)) primitiveStream
   fragmentStream <- rasterize (\ri -> (FrontAndBack, ViewPort (V2 0 0) (riScreenSize ri), DepthRange 0 1)) primitiveStream2
   let fragmentStream2 = withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z)) fragmentStream
-  drawContextColorDepth (const (ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream2
+  drawWindowColorDepth (const (win,ContextColorOption NoBlending (pure True),DepthOption Lequal True)) fragmentStream2
 
-compileMaterial :: (MonadIO m, MonadException m) => (Texture2DArray os (Format RGBFloat)) -> Texture2D os (Format RGBAFloat) -> T.Trie (Texture2D os (Format RGBAFloat)) -> Tables os -> Buffer os (Uniform UniInput) -> CommonAttrs -> ContextT w os CF m (CompiledShader os CF (RenderInput os))
-compileMaterial lightMap checkerTex texInfo tables uniformBuffer shaderInfo = do
+compileMaterial :: (ContextHandler w, MonadIO m, MonadException m) => Window os RGBAFloat Depth -> (Texture2DArray os (Format RGBFloat)) -> Texture2D os (Format RGBAFloat) -> T.Trie (Texture2D os (Format RGBAFloat)) -> Tables os -> Buffer os (Uniform UniInput) -> CommonAttrs -> ContextT w os m (CompiledShader os (RenderInput os))
+compileMaterial win lightMap checkerTex texInfo tables uniformBuffer shaderInfo = do
  liftIO (putStr ".")
  compileShader $ do
   uni <- getUniform (const (uniformBuffer,0))
@@ -98,11 +97,13 @@ compileMaterial lightMap checkerTex texInfo tables uniformBuffer shaderInfo = do
                   <*> newSampler1D (const (invSawT, filter, edge))
                   <*> newSampler1D (const (triT, filter, edge))
                   <*> newSampler1D (const (triT, filter, edge)) -- TODO: generate noise
-  mkShader lightMap checkerTex texInfo wt uni shaderInfo
+  mkShader win lightMap checkerTex texInfo wt uni shaderInfo
 
 renderQuake :: V3 Float -> BSPLevel -> T.Trie CommonAttrs -> T.Trie (Juicy.Image PixelRGBA8) -> IO ()
 renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
-  runContextT (GLFW.simpleContext "Q3 Viewer") (ContextFormatColorDepth RGBA32F Depth32) $ do
+  runContextT (GLFW.defaultHandleConfig { GLFW.configEventPolicy = Nothing }) $ do
+    win <- newWindow (WindowFormatColorDepth RGBA32F Depth32) (GLFW.defaultWindowConfig "Q3 Viewer")
+
     -- pre tesselate patches and append to static draw verices and indices
     let patches     = map (tessellatePatch blDrawVertices 5) $ V.toList blSurfaces
         (verticesQ3,indicesQ3) = mconcat $ (blDrawVertices,blDrawIndices):patches
@@ -145,10 +146,10 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
     texInfo <- sequence $ mkTex <$> imageInfo
 
     -- shader for unknown materials
-    missingMaterialShader <- missingMaterial uniformBuffer
+    missingMaterialShader <- missingMaterial win uniformBuffer
 
     --  create shader for each material
-    usedShaders <- mapM (\Shader{..} -> maybe (return missingMaterialShader) (compileMaterial lightmapArray checkerTex texInfo tables uniformBuffer) $ T.lookup shName shaderInfo) blShaders
+    usedShaders <- mapM (\Shader{..} -> maybe (return missingMaterialShader) (compileMaterial win lightmapArray checkerTex texInfo tables uniformBuffer) $ T.lookup shName shaderInfo) blShaders
     let surfaces vpSize = do
           surface0 <- zipWithM (convertSurface bsp indexBufferQ3 vertexBufferQ3 lightmapCount) patchInfo $ V.toList blSurfaces
           -- group surfaces by material
@@ -168,22 +169,22 @@ renderQuake startPos bsp@BSPLevel{..} shaderInfo imageInfo =
           allSurf
 
     liftIO $ putStrLn "Hello 1"
-    liftIO $ GLFWb.setTime 0
-    Just t0 <- liftIO $ GLFWb.getTime
-    renderLoop uniformBuffer (s0 startPos) t0 surfaces
+    liftIO $ GLFW.setTime 0
+    Just t0 <- liftIO $ GLFW.getTime
+    renderLoop win uniformBuffer (s0 startPos) t0 surfaces
 
-renderLoop uniformBuffer s t renderings = do
+renderLoop win uniformBuffer s t renderings = do
   -- read input
-  (mx,my) <- Input.getCursorPos
-  let keyIsPressed k = fmap (== Input.KeyState'Pressed) $ Input.getKey k
+  Just (mx,my) <- Input.getCursorPos win
+  let keyIsPressed k = fmap (== Input.KeyState'Pressed) . fmap (maybe Input.KeyState'Released id) $ Input.getKey win k
   keys <- (,,,,) <$> keyIsPressed Input.Key'Left
                  <*> keyIsPressed Input.Key'Up
                  <*> keyIsPressed Input.Key'Down
                  <*> keyIsPressed Input.Key'Right
                  <*> keyIsPressed Input.Key'RightShift
-  Just t' <- liftIO $ GLFWb.getTime
+  Just t' <- liftIO $ GLFW.getTime
 
-  size <- getContextBuffersSize
+  size <- getFrameBufferSize win
   let s'@(eye,center,up,_) = calcCam (t'-t) (realToFrac mx, realToFrac my) keys s
 {-
   uniform tuple:
@@ -193,16 +194,15 @@ renderLoop uniformBuffer s t renderings = do
   writeBuffer uniformBuffer 0 [(fromIntegral <$> size,(V3 1 1 1, 1, 1, realToFrac t', eye, center, up))]
 
   render $ do
-    clearContextColor 0.5
-    clearContextDepth 1
+    clearWindowColor win 0.5
+    clearWindowDepth win 1
     renderings size
 
-  swapContextBuffers
-  closeRequested <- Input.windowShouldClose
+  swapWindowBuffers win
+  Just closeRequested <- GLFW.windowShouldClose win
   unless closeRequested $ do
-    liftIO $ do
-      GLFWb.pollEvents
-    renderLoop uniformBuffer s' t' renderings
+    GLFW.mainstep win GLFW.Poll
+    renderLoop win uniformBuffer s' t' renderings
 
 -- Utility code
 tableTexture table = do

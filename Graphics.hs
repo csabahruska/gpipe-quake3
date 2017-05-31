@@ -184,8 +184,8 @@ mkRasterContext ca (riScreenSize -> V2 w h) = (cull, ViewPort (V2 0 0) (V2 w h),
         CT_BackSided    -> Front --Back
         CT_TwoSided     -> FrontAndBack
 
-mkAccumulationContext :: StageAttrs -> (ContextColorOption RGBAFloat, DepthOption)
-mkAccumulationContext StageAttrs{..} = (ContextColorOption blend (pure True), DepthOption depthFunc saDepthWrite)
+mkAccumulationContext :: w -> StageAttrs -> (w, ContextColorOption RGBAFloat, DepthOption)
+mkAccumulationContext win StageAttrs{..} = (win, ContextColorOption blend (pure True), DepthOption depthFunc saDepthWrite)
   where
     depthFunc   = case saDepthFunc of
         D_Equal     -> Equal
@@ -209,7 +209,7 @@ mkAccumulationContext StageAttrs{..} = (ContextColorOption blend (pure True), De
         B_SrcColor          -> SrcColor
         B_Zero              -> Zero
 
-mkStage lightmapArray checkerTex texInfo wt uni ca sa = do
+mkStage win lightmapArray checkerTex texInfo wt uni ca sa = do
   let (edge,diffuse) = case saTexture sa of
         ST_WhiteImage   -> (Repeat,       checkerTex)
         ST_Lightmap     -> (ClampToEdge,  checkerTex)
@@ -224,7 +224,7 @@ mkStage lightmapArray checkerTex texInfo wt uni ca sa = do
   fragmentStream <- rasterize (mkRasterContext ca) (mkVertexShader wt uni ca sa <$> primitiveStream)
   let filteredFragmentStream = filterFragments (mkFilterFunction diffuseSmp lightmapSmp ca sa) fragmentStream
   --drawContextColorDepth (const $ mkAccumulationContext sa) $ withRasterizedInfo (\a r -> (a, rasterizedFragCoord r ^. _z + if caPolygonOffset ca then -2 else 0)) (mkFragmentShader sa <$> filteredFragmentStream)
-  drawContextColorDepth (const $ mkAccumulationContext sa) $
+  drawWindowColorDepth (const $ mkAccumulationContext win sa) $
     withRasterizedInfo
       (\a r -> (a, rasterizedFragCoord r ^. _z))
       (mkFragmentShader diffuseSmp lightmapSmp ca sa <$> filteredFragmentStream)
@@ -250,4 +250,4 @@ data RenderInput os
   , riStream      :: PrimitiveArray Triangles (Float, (B3 Float, B3 Float, B2 Float, B2 Float, B4 Float)) --(Float, AttInput)
   }
 
-mkShader lightMap checkerTex texInfo wt uni ca = mapM_ (mkStage lightMap checkerTex texInfo wt uni ca) $ caStages ca
+mkShader win lightMap checkerTex texInfo wt uni ca = mapM_ (mkStage win lightMap checkerTex texInfo wt uni ca) $ caStages ca
