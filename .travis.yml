@@ -12,6 +12,13 @@ addons:
     packages:
     - libgmp-dev      # for ghc
     - libxxf86vm-dev  # for GLFW
+    - libgl1-mesa-dev
+    - libxi-dev
+    - libxcursor-dev
+    - libxinerama-dev
+    - libxrandr-dev
+    - zlib1g-dev
+    - libpulse-dev
 
 # different configurations:
 env:
@@ -29,7 +36,7 @@ before_install:
 - stack --no-terminal install hscolour
 
 # build
-script: stack $ARGS --no-terminal --install-ghc test --haddock
+script: stack $ARGS --no-terminal --install-ghc test
 
 # set up caching
 cache:
