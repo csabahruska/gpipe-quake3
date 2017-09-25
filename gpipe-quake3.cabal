@@ -19,7 +19,7 @@ executable gpipe-quake3
   main-is:             Main.hs
   -- other-modules:
   other-extensions:    OverloadedStrings, TypeOperators, DataKinds, PackageImports, TupleSections, ScopedTypeVariables, TypeFamilies, FlexibleContexts, RecordWildCards
-  build-depends:       base >=4.8 && <4.10,
+  build-depends:       base >=4.8 && <4.11,
                        binary >=0.7 && <0.9,
                        data-binary-ieee754 >=0.4 && <0.5,
                        linear >= 1.20 && <1.21,
