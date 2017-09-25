@@ -17,7 +17,14 @@ cabal-version:       >=1.10
 
 executable gpipe-quake3
   main-is:             Main.hs
-  -- other-modules:
+  other-modules:       BSP
+                       Camera
+                       Graphics
+                       Material
+                       Q3Patch
+                       Render
+                       ShaderParser
+                       Zip
   other-extensions:    OverloadedStrings, TypeOperators, DataKinds, PackageImports, TupleSections, ScopedTypeVariables, TypeFamilies, FlexibleContexts, RecordWildCards
   build-depends:       base >=4.8 && <4.11,
                        binary >=0.7 && <0.9,
